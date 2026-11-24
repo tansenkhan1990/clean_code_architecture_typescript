@@ -15,8 +15,8 @@ function toTodo(document: TodoDocument): Todo {
     id: document._id.toHexString(),
     title: document.title,
     completed: document.completed,
-    createdAt: document.createdAt.toISOString(),
-    updatedAt: document.updatedAt.toISOString(),
+    createdAt: document.createdAt,
+    updatedAt: document.updatedAt,
   };
 }
 
@@ -64,10 +64,13 @@ export class MongoTodoRepository implements TodoRepository {
     if (input.title !== undefined) changes.title = input.title;
     if (input.completed !== undefined) changes.completed = input.completed;
 
-    const result = await this.todos.updateOne({ _id: objectId }, { $set: changes });
-    if (result.matchedCount === 0) return undefined;
+    const document = await this.todos.findOneAndUpdate(
+      { _id: objectId },
+      { $set: changes },
+      { returnDocument: "after", includeResultMetadata: false },
+    );
 
-    return this.findById(id);
+    return document ? toTodo(document) : undefined;
   }
 
   async delete(id: string): Promise<boolean> {

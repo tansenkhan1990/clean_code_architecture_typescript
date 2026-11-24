@@ -1,9 +1,5 @@
 import { env } from "./config/env.js";
-import { CreateTodo } from "./application/use-cases/create-todo.js";
-import { DeleteTodo } from "./application/use-cases/delete-todo.js";
-import { GetTodo } from "./application/use-cases/get-todo.js";
-import { ListTodos } from "./application/use-cases/list-todos.js";
-import { UpdateTodo } from "./application/use-cases/update-todo.js";
+import { createTodoUseCases } from "./application/use-cases/todo-use-cases.js";
 import { connectToMongo } from "./infrastructure/database/mongo-database.js";
 import { MongoTodoRepository } from "./infrastructure/repositories/mongo-todo-repository.js";
 import { createApp } from "./presentation/http/app.js";
@@ -12,13 +8,7 @@ import { TodoController } from "./presentation/http/todo-controller.js";
 async function startServer(): Promise<void> {
   const { client, todos } = await connectToMongo(env.MONGODB_URI, env.MONGODB_DATABASE);
   const todoRepository = new MongoTodoRepository(todos);
-  const todoController = new TodoController({
-    create: new CreateTodo(todoRepository),
-    list: new ListTodos(todoRepository),
-    get: new GetTodo(todoRepository),
-    update: new UpdateTodo(todoRepository),
-    delete: new DeleteTodo(todoRepository),
-  });
+  const todoController = new TodoController(createTodoUseCases(todoRepository));
 
   const app = createApp(todoController);
   const server = app.listen(env.PORT, () => {

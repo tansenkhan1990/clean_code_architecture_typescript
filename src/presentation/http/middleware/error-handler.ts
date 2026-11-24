@@ -1,6 +1,10 @@
 import type { ErrorRequestHandler } from "express";
 import { ZodError } from "zod";
-import { AppError } from "../../../domain/errors/app-error.js";
+import {
+  NotFoundError,
+  ValidationError,
+} from "../../../application/errors/application-error.js";
+import { HttpError } from "../http-error.js";
 
 export const errorHandler: ErrorRequestHandler = (error: unknown, request, response, _next) => {
   if (error instanceof ZodError) {
@@ -17,7 +21,21 @@ export const errorHandler: ErrorRequestHandler = (error: unknown, request, respo
     return;
   }
 
-  if (error instanceof AppError) {
+  if (error instanceof ValidationError) {
+    response.status(400).json({
+      error: { code: error.code, message: error.message },
+    });
+    return;
+  }
+
+  if (error instanceof NotFoundError) {
+    response.status(404).json({
+      error: { code: error.code, message: error.message },
+    });
+    return;
+  }
+
+  if (error instanceof HttpError) {
     response.status(error.statusCode).json({
       error: { code: error.code, message: error.message },
     });

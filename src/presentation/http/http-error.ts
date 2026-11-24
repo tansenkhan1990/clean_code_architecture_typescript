@@ -1,4 +1,4 @@
-export class AppError extends Error {
+export class HttpError extends Error {
   constructor(
     message: string,
     public readonly statusCode: number,
@@ -9,13 +9,7 @@ export class AppError extends Error {
   }
 }
 
-export class NotFoundError extends AppError {
-  constructor(resource: string) {
-    super(`${resource} was not found.`, 404, "NOT_FOUND");
-  }
-}
-
-export class BadRequestError extends AppError {
+export class BadRequestError extends HttpError {
   constructor(message: string) {
     super(message, 400, "BAD_REQUEST");
   }

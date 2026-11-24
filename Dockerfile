@@ -10,7 +10,7 @@ RUN npm run build
 FROM node:22-bookworm-slim AS runtime
 ENV NODE_ENV=production
 ENV PORT=3000
-ENV DATABASE_PATH=/app/data/todos.sqlite
+ENV MONGODB_DATABASE=clean_code_todos
 
 WORKDIR /app
 COPY package*.json ./

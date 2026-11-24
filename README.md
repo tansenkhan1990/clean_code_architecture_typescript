@@ -10,7 +10,7 @@ Requirements: Docker with the Compose plugin.
 docker compose up --build
 ```
 
-The API listens on `http://localhost:3000`. MongoDB is available on `localhost:27017` for local development. Compose uses a local development username and password by default; set `MONGO_ROOT_USERNAME` and `MONGO_ROOT_PASSWORD` in `.env` before using this setup beyond local learning.
+The API listens on `http://localhost:3000`. MongoDB is available on `localhost:27017` for local development. Compose creates a restricted `readWrite` database user for the API; the root user is only used by MongoDB's health check. The committed credentials are for local learning. Set `MONGO_ROOT_PASSWORD` and `MONGO_APP_PASSWORD` in `.env` before using this setup beyond local learning. Keep the app password URL-safe, or URL-encode it in `MONGODB_URI` when running the API directly.
 
 To stop the services, press `Ctrl+C`. To stop them and delete the database volume, run `docker compose down -v`.
 
@@ -24,7 +24,7 @@ cp .env.example .env
 npm run dev
 ```
 
-The `.env` file connects to MongoDB on `localhost:27017`. Start the database separately, or run only the database container with `docker compose up mongo` in another terminal. If you change the MongoDB credentials in `.env`, update the username and password in `MONGODB_URI` too. Use `npm run build && npm start` to run the compiled API.
+The `.env` file connects to MongoDB on `localhost:27017`. Start the database separately, or run only the database container with `docker compose up mongo` in another terminal. If you change the app user's credentials or database name in `.env`, update `MONGODB_URI` too. Use `npm run build && npm start` to run the compiled API. Run `npm test` for the HTTP/API checks; these use an in-memory repository and do not require MongoDB.
 
 ## Try the API
 
@@ -65,10 +65,10 @@ HTTP request
   <- infrastructure/database (connection and index)
 ```
 
-- **Domain** contains the Todo shape, application errors, and `TodoRepository` interface. It does not import Express or MongoDB.
-- **Application** contains one class per action. A use case depends on the repository interface, so the same action can work with another storage adapter.
+- **Domain** contains the Todo shape, the title rule (`parseTodoTitle`), and the `TodoRepository` interface. Timestamps are `Date` values; ISO strings appear only when a response is serialized. It does not import Express or MongoDB.
+- **Application** contains one class per action, enforces domain rules, and throws application errors such as `NotFoundError` and `ValidationError`. `createTodoUseCases` wires the use cases for the composition root. A use case depends on the repository interface, so the same action can work with another storage adapter.
 - **Infrastructure** implements that interface with the MongoDB driver. Database documents are converted into the domain Todo shape here.
-- **Presentation** translates HTTP requests into use-case calls and formats HTTP responses. Zod validates untrusted request data at the boundary.
+- **Presentation** translates HTTP requests into use-case calls and formats HTTP responses. It owns HTTP-specific errors, and Zod validates untrusted request data at the boundary.
 - **`server.ts`** is the composition root: it connects to MongoDB, connects the adapter to the use cases, creates the controller, and starts the server.
 
 ## Endpoints

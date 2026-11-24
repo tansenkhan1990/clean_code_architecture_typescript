@@ -5,11 +5,15 @@ services:
     environment:
       MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME:-root}
       MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD:-localdevpassword}
-      MONGO_INITDB_DATABASE: clean_code_todos
+      MONGO_INITDB_DATABASE: ${MONGO_APP_DATABASE:-clean_code_todos}
+      MONGO_APP_USERNAME: ${MONGO_APP_USERNAME:-todo_api}
+      MONGO_APP_PASSWORD: ${MONGO_APP_PASSWORD:-tododevpassword}
+      MONGO_APP_DATABASE: ${MONGO_APP_DATABASE:-clean_code_todos}
     ports:
       - "127.0.0.1:27017:27017"
     volumes:
       - mongo-data:/data/db
+      - ./docker/mongo-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test:
         - CMD-SHELL
@@ -31,8 +35,8 @@ services:
     environment:
       NODE_ENV: production
       PORT: 3000
-      MONGODB_URI: mongodb://${MONGO_ROOT_USERNAME:-root}:${MONGO_ROOT_PASSWORD:-localdevpassword}@mongo:27017/?authSource=admin
-      MONGODB_DATABASE: clean_code_todos
+      MONGODB_URI: mongodb://${MONGO_APP_USERNAME:-todo_api}:${MONGO_APP_PASSWORD:-tododevpassword}@mongo:27017/${MONGO_APP_DATABASE:-clean_code_todos}?authSource=${MONGO_APP_DATABASE:-clean_code_todos}
+      MONGODB_DATABASE: ${MONGO_APP_DATABASE:-clean_code_todos}
     healthcheck:
       test:
         - CMD

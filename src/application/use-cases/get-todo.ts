@@ -1,5 +1,5 @@
 import type { Todo } from "../../domain/entities/todo.js";
-import { NotFoundError } from "../../domain/errors/app-error.js";
+import { NotFoundError } from "../errors/application-error.js";
 import type { TodoRepository } from "../../domain/ports/todo-repository.js";
 
 export class GetTodo {

@@ -1,6 +1,10 @@
 import { ObjectId, type Collection } from "mongodb";
-import type { CreateTodoInput, Todo, UpdateTodoInput } from "../../domain/entities/todo.js";
-import type { TodoRepository } from "../../domain/ports/todo-repository.js";
+import type { Todo } from "../../domain/entities/todo.js";
+import type {
+  CreateTodoInput,
+  TodoRepository,
+  UpdateTodoInput,
+} from "../../application/ports/todo-repository.js";
 
 export interface TodoDocument {
   _id: ObjectId;

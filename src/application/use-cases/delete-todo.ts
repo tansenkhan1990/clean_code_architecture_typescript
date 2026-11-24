@@ -1,5 +1,5 @@
 import { NotFoundError } from "../errors/application-error.js";
-import type { TodoRepository } from "../../domain/ports/todo-repository.js";
+import type { TodoRepository } from "../ports/todo-repository.js";
 
 export class DeleteTodo {
   constructor(private readonly todos: TodoRepository) {}

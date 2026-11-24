@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import type { CreateTodoInput, Todo, UpdateTodoInput } from "../src/domain/entities/todo.js";
-import type { TodoRepository } from "../src/domain/ports/todo-repository.js";
+import type { Todo } from "../src/domain/entities/todo.js";
+import type {
+  CreateTodoInput,
+  TodoRepository,
+  UpdateTodoInput,
+} from "../src/application/ports/todo-repository.js";
 import { createTodoUseCases } from "../src/application/use-cases/todo-use-cases.js";
 import { createApp } from "../src/presentation/http/app.js";
 import { TodoController } from "../src/presentation/http/todo-controller.js";
@@ -108,8 +112,8 @@ test("Todo API validates input and supports the CRUD flow", async (context) => {
   assert.equal(listResponse.status, 200);
   assert.equal((await listResponse.json() as Todo[]).length, 1);
 
-  const invalidId = await fetch(`${api.baseUrl}/api/todos/not-an-object-id`);
-  assert.equal(invalidId.status, 400);
+  const unknownId = await fetch(`${api.baseUrl}/api/todos/not-an-object-id`);
+  assert.equal(unknownId.status, 404);
 
   const deleteResponse = await fetch(`${api.baseUrl}/api/todos/${created.id}`, { method: "DELETE" });
   assert.equal(deleteResponse.status, 204);

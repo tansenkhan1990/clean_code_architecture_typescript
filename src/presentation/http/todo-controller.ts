@@ -1,23 +1,16 @@
 import type { Request, Response } from "express";
 import { z } from "zod";
 import type { TodoUseCases } from "../../application/use-cases/todo-use-cases.js";
-import {
-  TODO_TITLE_MAX_LENGTH,
-  type Todo,
-  type UpdateTodoInput,
-} from "../../domain/entities/todo.js";
+import type { UpdateTodoInput } from "../../application/ports/todo-repository.js";
 import { BadRequestError } from "./http-error.js";
 
-const idSchema = z.string().regex(/^[a-f\d]{24}$/i);
 const createTodoSchema = z.object({
-  title: z.string().trim().min(1).max(TODO_TITLE_MAX_LENGTH),
+  title: z.string(),
 }).strict();
 const updateTodoSchema = z.object({
-  title: z.string().trim().min(1).max(TODO_TITLE_MAX_LENGTH).optional(),
+  title: z.string().optional(),
   completed: z.boolean().optional(),
-}).strict().refine((input) => Object.keys(input).length > 0, {
-  message: "Provide at least one field to update.",
-});
+}).strict();
 
 export class TodoController {
   constructor(private readonly useCases: TodoUseCases) {}
@@ -49,9 +42,9 @@ export class TodoController {
   };
 
   private parseId(id: string | string[] | undefined): string {
-    if (typeof id !== "string") throw new BadRequestError("Todo id must be a valid MongoDB ObjectId.");
-    const result = idSchema.safeParse(id);
-    if (!result.success) throw new BadRequestError("Todo id must be a valid MongoDB ObjectId.");
-    return result.data;
+    if (typeof id !== "string" || id.length === 0) {
+      throw new BadRequestError("Todo id is required.");
+    }
+    return id;
   }
 }

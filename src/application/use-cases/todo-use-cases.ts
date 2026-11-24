@@ -1,5 +1,5 @@
-import type { Todo, UpdateTodoInput } from "../../domain/entities/todo.js";
-import type { TodoRepository } from "../../domain/ports/todo-repository.js";
+import type { Todo } from "../../domain/entities/todo.js";
+import type { TodoRepository, UpdateTodoInput } from "../ports/todo-repository.js";
 import { CreateTodo } from "./create-todo.js";
 import { DeleteTodo } from "./delete-todo.js";
 import { GetTodo } from "./get-todo.js";

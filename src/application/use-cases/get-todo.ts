@@ -1,6 +1,6 @@
 import type { Todo } from "../../domain/entities/todo.js";
 import { NotFoundError } from "../errors/application-error.js";
-import type { TodoRepository } from "../../domain/ports/todo-repository.js";
+import type { TodoRepository } from "../ports/todo-repository.js";
 
 export class GetTodo {
   constructor(private readonly todos: TodoRepository) {}

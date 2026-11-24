@@ -8,20 +8,11 @@ export interface Todo {
   updatedAt: Date;
 }
 
-export interface CreateTodoInput {
-  title: string;
-}
-
-export interface UpdateTodoInput {
-  title?: string;
-  completed?: boolean;
-}
-
 export type ParsedTodoTitle =
   | { readonly valid: true; readonly title: string }
   | { readonly valid: false; readonly message: string };
 
-/** The title rule belongs to the entity, so every adapter enforces the same invariant. */
+/** Keep the title invariant in the domain so every use case can apply it consistently. */
 export function parseTodoTitle(input: string): ParsedTodoTitle {
   const title = input.trim();
   if (title.length === 0) {

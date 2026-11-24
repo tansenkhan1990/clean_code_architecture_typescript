@@ -42,7 +42,7 @@ List Todos:
 curl http://localhost:3000/api/todos
 ```
 
-Fetch, update, or delete one Todo by replacing `<id>` with the 24-character MongoDB ObjectId returned when it was created:
+Fetch, update, or delete one Todo by replacing `<id>` with the id returned when it was created:
 
 ```sh
 curl http://localhost:3000/api/todos/<id>
@@ -52,7 +52,7 @@ curl -X PATCH http://localhost:3000/api/todos/<id> \
 curl -i -X DELETE http://localhost:3000/api/todos/<id>
 ```
 
-`GET /health` returns the service health. Invalid input receives a `400`, a missing Todo receives a `404`, and unexpected errors receive a generic `500` response. Requests include an `X-Request-Id` response header and JSON log line.
+`GET /health` returns the service health. Invalid request data receives a `400`, an unknown Todo receives a `404`, and unexpected errors receive a generic `500` response. Todo ids are opaque to clients; the current MongoDB adapter happens to generate ObjectId-shaped ids. Requests include an `X-Request-Id` response header and JSON log line.
 
 ## How the architecture fits together
 
@@ -60,15 +60,15 @@ curl -i -X DELETE http://localhost:3000/api/todos/<id>
 HTTP request
   -> presentation/http (routes, controller, validation)
   -> application/use-cases (the actions the app supports)
-  -> domain (Todo type, errors, repository contract)
-  <- infrastructure/repositories (MongoDB implementation)
+  -> domain (Todo model and business rules)
+  <- infrastructure/repositories (MongoDB implementation of the application port)
   <- infrastructure/database (connection and index)
 ```
 
-- **Domain** contains the Todo shape, the title rule (`parseTodoTitle`), and the `TodoRepository` interface. Timestamps are `Date` values; ISO strings appear only when a response is serialized. It does not import Express or MongoDB.
-- **Application** contains one class per action, enforces domain rules, and throws application errors such as `NotFoundError` and `ValidationError`. `createTodoUseCases` wires the use cases for the composition root. A use case depends on the repository interface, so the same action can work with another storage adapter.
+- **Domain** contains the Todo shape and the title rule (`parseTodoTitle`). Timestamps are `Date` values; ISO strings appear only when a response is serialized. It does not import Express, MongoDB, or persistence contracts.
+- **Application** contains one class per action, owns the `TodoRepository` port, enforces domain rules, and throws application errors such as `NotFoundError` and `ValidationError`. `createTodoUseCases` exposes the use cases to the presentation layer. A use case depends on the repository port, so the same action can work with another storage adapter.
 - **Infrastructure** implements that interface with the MongoDB driver. Database documents are converted into the domain Todo shape here.
-- **Presentation** translates HTTP requests into use-case calls and formats HTTP responses. It owns HTTP-specific errors, and Zod validates untrusted request data at the boundary.
+- **Presentation** translates HTTP requests into use-case calls and formats HTTP responses. It owns HTTP-specific errors, and Zod validates request structure at the boundary. Business rules, such as trimming and limiting Todo titles, are enforced by the application through the domain model.
 - **`server.ts`** is the composition root: it connects to MongoDB, connects the adapter to the use cases, creates the controller, and starts the server.
 
 ## Endpoints

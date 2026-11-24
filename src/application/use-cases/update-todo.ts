@@ -1,5 +1,5 @@
-import { parseTodoTitle, type Todo, type UpdateTodoInput } from "../../domain/entities/todo.js";
-import type { TodoRepository } from "../../domain/ports/todo-repository.js";
+import { parseTodoTitle, type Todo } from "../../domain/entities/todo.js";
+import type { TodoRepository, UpdateTodoInput } from "../ports/todo-repository.js";
 import { NotFoundError, ValidationError } from "../errors/application-error.js";
 
 export class UpdateTodo {

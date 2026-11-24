@@ -1,23 +1,26 @@
 import { randomUUID } from "node:crypto";
-import type { NextFunction, Request, Response } from "express";
-import { logger } from "../../../infrastructure/logging/logger.js";
+import type { RequestHandler } from "express";
+import type { Logger } from "../logging.js";
 
-export function requestLogger(request: Request, response: Response, next: NextFunction): void {
-  const requestId = randomUUID();
-  const startedAt = Date.now();
-  // Express rewrites request.path while routing, so snapshot the full URL now.
-  const path = request.originalUrl;
-  response.setHeader("X-Request-Id", requestId);
+/** Adds a request id and logs one structured line when the response finishes. */
+export function createRequestLogger(logger: Logger): RequestHandler {
+  return (request, response, next) => {
+    const requestId = randomUUID();
+    const startedAt = Date.now();
+    // Express rewrites request.path while routing, so snapshot the full URL now.
+    const path = request.originalUrl;
+    response.setHeader("X-Request-Id", requestId);
 
-  response.on("finish", () => {
-    logger.info("HTTP request", {
-      requestId,
-      method: request.method,
-      path,
-      statusCode: response.statusCode,
-      durationMs: Date.now() - startedAt,
+    response.on("finish", () => {
+      logger.info("HTTP request", {
+        requestId,
+        method: request.method,
+        path,
+        statusCode: response.statusCode,
+        durationMs: Date.now() - startedAt,
+      });
     });
-  });
 
-  next();
+    next();
+  };
 }

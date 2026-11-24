@@ -1,74 +1,31 @@
-import type { ErrorRequestHandler } from "express";
-import { ZodError } from "zod";
-import {
-  NotFoundError,
-  ValidationError,
-} from "../../../application/errors/application-error.js";
-import { HttpError } from "../http-error.js";
+import type { ErrorRequestHandler, Response } from "express";
+import { logger } from "../../../infrastructure/logging/logger.js";
+import { mapError, type ErrorResponse } from "../error-mapper.js";
 
-export const errorHandler: ErrorRequestHandler = (error: unknown, request, response, _next) => {
-  if (error instanceof ZodError) {
-    response.status(400).json({
-      error: {
-        code: "VALIDATION_ERROR",
-        message: "The request is invalid.",
-        details: error.issues.map((issue) => ({
-          field: issue.path.join("."),
-          message: issue.message,
-        })),
-      },
-    });
-    return;
-  }
-
-  if (error instanceof ValidationError) {
-    response.status(400).json({
-      error: { code: error.code, message: error.message },
-    });
-    return;
-  }
-
-  if (error instanceof NotFoundError) {
-    response.status(404).json({
-      error: { code: error.code, message: error.message },
-    });
-    return;
-  }
-
-  if (error instanceof HttpError) {
-    response.status(error.statusCode).json({
-      error: { code: error.code, message: error.message },
-    });
-    return;
-  }
-
-  if (isMalformedJsonError(error)) {
-    response.status(400).json({
-      error: { code: "INVALID_JSON", message: "Request body must contain valid JSON." },
-    });
-    return;
-  }
-
-  console.error(
-    JSON.stringify({
-      level: "error",
-      message: "Unhandled request error",
-      method: request.method,
-      path: request.path,
-      requestId: response.getHeader("X-Request-Id"),
-      error: error instanceof Error ? error.message : String(error),
-    }),
-  );
-  response.status(500).json({
-    error: { code: "INTERNAL_SERVER_ERROR", message: "An unexpected error occurred." },
-  });
+const INTERNAL_ERROR: ErrorResponse = {
+  statusCode: 500,
+  code: "INTERNAL_SERVER_ERROR",
+  message: "An unexpected error occurred.",
 };
 
-function isMalformedJsonError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "type" in error &&
-    error.type === "entity.parse.failed"
-  );
+/** Express adapter: known errors are mapped, unknown ones are logged as a generic 500. */
+export const errorHandler: ErrorRequestHandler = (error: unknown, request, response, _next) => {
+  const mapped = mapError(error);
+  if (mapped) {
+    sendError(response, mapped);
+    return;
+  }
+
+  logger.error("Unhandled request error", error, {
+    method: request.method,
+    path: request.originalUrl,
+    requestId: response.getHeader("X-Request-Id"),
+  });
+  sendError(response, INTERNAL_ERROR);
+};
+
+function sendError(response: Response, error: ErrorResponse): void {
+  const { statusCode, code, message, details } = error;
+  const body = details === undefined ? { code, message } : { code, message, details };
+  response.status(statusCode).json({ error: body });
 }

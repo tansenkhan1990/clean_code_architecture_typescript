@@ -58,7 +58,7 @@ curl -i -X DELETE http://localhost:3000/api/todos/<id>
 
 ```text
 HTTP request
-  -> presentation/http (routes, controller, validation)
+  -> presentation/http (routes, controller, request parsing, response DTOs)
   -> application/use-cases (the actions the app supports)
   -> domain (Todo model and business rules)
   <- infrastructure/repositories (MongoDB implementation of the application port)
@@ -67,9 +67,9 @@ HTTP request
 
 - **Domain** contains the Todo shape and the title rule (`parseTodoTitle`). Timestamps are `Date` values; ISO strings appear only when a response is serialized. It does not import Express, MongoDB, or persistence contracts.
 - **Application** contains one class per action, owns the `TodoRepository` port, enforces domain rules, and throws application errors such as `NotFoundError` and `ValidationError`. `createTodoUseCases` exposes the use cases to the presentation layer. A use case depends on the repository port, so the same action can work with another storage adapter.
-- **Infrastructure** implements that interface with the MongoDB driver. Database documents are converted into the domain Todo shape here.
-- **Presentation** translates HTTP requests into use-case calls and formats HTTP responses. It owns HTTP-specific errors, and Zod validates request structure at the boundary. Business rules, such as trimming and limiting Todo titles, are enforced by the application through the domain model.
-- **`server.ts`** is the composition root: it connects to MongoDB, connects the adapter to the use cases, creates the controller, and starts the server.
+- **Infrastructure** provides everything the outside world supplies: the MongoDB repository and connection, environment configuration (`infrastructure/config/`), the HTTP listener (`infrastructure/http/server.ts`), the structured JSON logger (`infrastructure/logging/`), and the process shutdown routine (`infrastructure/lifecycle/`). Database documents are converted into the domain Todo shape here.
+- **Presentation** translates HTTP requests into use-case calls and owns the HTTP contract: request parsing (`todo-request.ts`), response DTOs (`todo-response.ts`) so domain entities never reach the wire, HTTP-specific errors, and the single error mapping in `error-mapper.ts`. Business rules, such as trimming and limiting Todo titles, are enforced by the application through the domain model.
+- **Composition** (`composition/`) is the only layer that knows every other one: `container.ts` connects MongoDB and builds the repository, use cases, controller, and app, while `bootstrap.ts` binds the port and registers shutdown. `main.ts` is only the entrypoint: it loads configuration, starts the application, and reports startup failures.
 
 ## Endpoints
 

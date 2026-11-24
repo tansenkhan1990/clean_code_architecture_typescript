@@ -1,5 +1,6 @@
 import type { Todo } from "../../domain/entities/todo.js";
-import type { TodoRepository, UpdateTodoInput } from "../ports/todo-repository.js";
+import type { TodoRepository } from "../ports/todo-repository.js";
+import type { CreateTodoCommand, UpdateTodoCommand } from "../todo-commands.js";
 import { CreateTodo } from "./create-todo.js";
 import { DeleteTodo } from "./delete-todo.js";
 import { GetTodo } from "./get-todo.js";
@@ -8,10 +9,10 @@ import { UpdateTodo } from "./update-todo.js";
 
 /** The application surface the presentation layer depends on. */
 export interface TodoUseCases {
-  create(title: string): Promise<Todo>;
+  create(input: CreateTodoCommand): Promise<Todo>;
   list(): Promise<Todo[]>;
   get(id: string): Promise<Todo>;
-  update(id: string, input: UpdateTodoInput): Promise<Todo>;
+  update(id: string, input: UpdateTodoCommand): Promise<Todo>;
   delete(id: string): Promise<void>;
 }
 
@@ -23,7 +24,7 @@ export function createTodoUseCases(todos: TodoRepository): TodoUseCases {
   const deleteTodo = new DeleteTodo(todos);
 
   return {
-    create: (title) => createTodo.execute(title),
+    create: (input) => createTodo.execute(input),
     list: () => listTodos.execute(),
     get: (id) => getTodo.execute(id),
     update: (id, input) => updateTodo.execute(id, input),

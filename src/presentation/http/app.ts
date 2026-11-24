@@ -1,6 +1,7 @@
 import express, { type Express } from "express";
 import helmet from "helmet";
 import { errorHandler } from "./middleware/error-handler.js";
+import { notFoundHandler } from "./middleware/not-found-handler.js";
 import { requestLogger } from "./middleware/request-logger.js";
 import { createTodoRoutes } from "./todo-routes.js";
 import type { TodoController } from "./todo-controller.js";
@@ -18,9 +19,7 @@ export function createApp(todoController: TodoController): Express {
   });
   app.use("/api/todos", createTodoRoutes(todoController));
 
-  app.use((_request, response) => {
-    response.status(404).json({ error: { code: "ROUTE_NOT_FOUND", message: "Route was not found." } });
-  });
+  app.use(notFoundHandler);
   app.use(errorHandler);
 
   return app;

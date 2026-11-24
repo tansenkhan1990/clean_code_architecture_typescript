@@ -1,9 +1,9 @@
-import { ObjectId, type Collection } from "mongodb";
+import { ObjectId, type Collection, type Db } from "mongodb";
 import type { Todo } from "../../domain/entities/todo.js";
 import type {
-  CreateTodoInput,
+  NewTodo,
   TodoRepository,
-  UpdateTodoInput,
+  TodoChanges,
 } from "../../application/ports/todo-repository.js";
 
 export interface TodoDocument {
@@ -13,6 +13,8 @@ export interface TodoDocument {
   createdAt: Date;
   updatedAt: Date;
 }
+
+const TODOS_COLLECTION = "todos";
 
 function toTodo(document: TodoDocument): Todo {
   return {
@@ -29,9 +31,18 @@ function toObjectId(id: string): ObjectId | undefined {
 }
 
 export class MongoTodoRepository implements TodoRepository {
-  constructor(private readonly todos: Collection<TodoDocument>) {}
+  private readonly todos: Collection<TodoDocument>;
 
-  async create(input: CreateTodoInput): Promise<Todo> {
+  constructor(db: Db) {
+    this.todos = db.collection<TodoDocument>(TODOS_COLLECTION);
+  }
+
+  /** Creates the indexes this repository's queries rely on. */
+  async initialize(): Promise<void> {
+    await this.todos.createIndex({ createdAt: -1 });
+  }
+
+  async create(input: NewTodo): Promise<Todo> {
     const now = new Date();
     const document: TodoDocument = {
       _id: new ObjectId(),
@@ -58,7 +69,7 @@ export class MongoTodoRepository implements TodoRepository {
     return document ? toTodo(document) : undefined;
   }
 
-  async update(id: string, input: UpdateTodoInput): Promise<Todo | undefined> {
+  async update(id: string, input: TodoChanges): Promise<Todo | undefined> {
     const objectId = toObjectId(id);
     if (!objectId) return undefined;
 

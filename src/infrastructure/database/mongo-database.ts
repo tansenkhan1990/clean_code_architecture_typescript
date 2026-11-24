@@ -1,11 +1,11 @@
-import { MongoClient, type Collection } from "mongodb";
-import type { TodoDocument } from "../repositories/mongo-todo-repository.js";
+import { MongoClient, type Db } from "mongodb";
 
 export interface MongoDatabaseConnection {
   client: MongoClient;
-  todos: Collection<TodoDocument>;
+  db: Db;
 }
 
+/** Opens the connection only; collection and index details belong to the repository. */
 export async function connectToMongo(
   uri: string,
   databaseName: string,
@@ -14,10 +14,7 @@ export async function connectToMongo(
 
   try {
     await client.connect();
-    const todos = client.db(databaseName).collection<TodoDocument>("todos");
-    await todos.createIndex({ createdAt: -1 });
-
-    return { client, todos };
+    return { client, db: client.db(databaseName) };
   } catch (error) {
     await client.close().catch(() => undefined);
     throw error;

@@ -1,4 +1,3 @@
-import "dotenv/config";
 import { z } from "zod";
 
 const environmentSchema = z.object({
@@ -8,4 +7,9 @@ const environmentSchema = z.object({
   MONGODB_DATABASE: z.string().min(1).default("clean_code_todos"),
 });
 
-export const env = environmentSchema.parse(process.env);
+export type AppConfig = z.infer<typeof environmentSchema>;
+
+/** Parses untrusted process configuration once, when the entrypoint starts. */
+export function loadConfig(source: NodeJS.ProcessEnv): AppConfig {
+  return environmentSchema.parse(source);
+}

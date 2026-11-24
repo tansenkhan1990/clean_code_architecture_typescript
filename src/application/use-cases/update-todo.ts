@@ -1,12 +1,13 @@
 import { parseTodoTitle, type Todo } from "../../domain/entities/todo.js";
-import type { TodoRepository, UpdateTodoInput } from "../ports/todo-repository.js";
+import type { TodoChanges, TodoRepository } from "../ports/todo-repository.js";
+import type { UpdateTodoCommand } from "../todo-commands.js";
 import { NotFoundError, ValidationError } from "../errors/application-error.js";
 
 export class UpdateTodo {
   constructor(private readonly todos: TodoRepository) {}
 
-  async execute(id: string, input: UpdateTodoInput): Promise<Todo> {
-    const changes: UpdateTodoInput = {};
+  async execute(id: string, input: UpdateTodoCommand): Promise<Todo> {
+    const changes: TodoChanges = {};
     if (input.title !== undefined) {
       const parsedTitle = parseTodoTitle(input.title);
       if (!parsedTitle.valid) throw new ValidationError(parsedTitle.message);

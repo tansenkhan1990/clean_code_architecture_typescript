@@ -1,77 +1,7 @@
 import assert from "node:assert/strict";
-import { once } from "node:events";
-import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import type { Todo } from "../src/domain/entities/todo.js";
-import type {
-  CreateTodoInput,
-  TodoRepository,
-  UpdateTodoInput,
-} from "../src/application/ports/todo-repository.js";
-import { createTodoUseCases } from "../src/application/use-cases/todo-use-cases.js";
-import { createApp } from "../src/presentation/http/app.js";
-import { TodoController } from "../src/presentation/http/todo-controller.js";
-
-class InMemoryTodoRepository implements TodoRepository {
-  private readonly todos = new Map<string, Todo>();
-  private nextId = 1;
-
-  async create(input: CreateTodoInput): Promise<Todo> {
-    const now = new Date();
-    const todo: Todo = {
-      id: this.nextId.toString(16).padStart(24, "0"),
-      title: input.title,
-      completed: false,
-      createdAt: now,
-      updatedAt: now,
-    };
-    this.nextId += 1;
-    this.todos.set(todo.id, todo);
-    return todo;
-  }
-
-  async findAll(): Promise<Todo[]> {
-    return [...this.todos.values()];
-  }
-
-  async findById(id: string): Promise<Todo | undefined> {
-    return this.todos.get(id);
-  }
-
-  async update(id: string, input: UpdateTodoInput): Promise<Todo | undefined> {
-    const current = this.todos.get(id);
-    if (!current) return undefined;
-
-    const updated: Todo = {
-      ...current,
-      ...(input.title === undefined ? {} : { title: input.title }),
-      ...(input.completed === undefined ? {} : { completed: input.completed }),
-      updatedAt: new Date(),
-    };
-    this.todos.set(id, updated);
-    return updated;
-  }
-
-  async delete(id: string): Promise<boolean> {
-    return this.todos.delete(id);
-  }
-}
-
-async function startTestApi(): Promise<{ baseUrl: string; close: () => Promise<void> }> {
-  const repository = new InMemoryTodoRepository();
-  const controller = new TodoController(createTodoUseCases(repository));
-
-  const server = createApp(controller).listen(0, "127.0.0.1");
-  await once(server, "listening");
-  const address = server.address() as AddressInfo;
-
-  return {
-    baseUrl: `http://127.0.0.1:${address.port}`,
-    close: () => new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    }),
-  };
-}
+import { startTestApi } from "./support/test-api.js";
 
 test("Todo API validates input and supports the CRUD flow", async (context) => {
   const api = await startTestApi();

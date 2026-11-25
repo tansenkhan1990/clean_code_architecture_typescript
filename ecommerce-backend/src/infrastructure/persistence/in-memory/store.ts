@@ -1,4 +1,5 @@
 import type { OutboxMessage } from "../../../application/ports/outbox.js";
+import type { Account } from "../../../domain/auth/account.js";
 import type { Cart, CartId } from "../../../domain/cart/cart.js";
 import type { Customer } from "../../../domain/customer/customer.js";
 import type { CustomerId } from "../../../domain/customer/customer-id.js";
@@ -10,6 +11,7 @@ import type { ProductId } from "../../../domain/product/product-id.js";
 /** Every table the in-memory adapters keep, in one swappable object. */
 export type InMemoryStore = {
   customers: Map<CustomerId, Customer>;
+  accounts: Map<CustomerId, Account>;
   products: Map<ProductId, Product>;
   inventory: Map<ProductId, InventoryItem>;
   carts: Map<CartId, Cart>;
@@ -30,6 +32,7 @@ export function createInMemoryStore(): InMemoryStoreRef {
   return {
     current: {
       customers: new Map(),
+      accounts: new Map(),
       products: new Map(),
       inventory: new Map(),
       carts: new Map(),

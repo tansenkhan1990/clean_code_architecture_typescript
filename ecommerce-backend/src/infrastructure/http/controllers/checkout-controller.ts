@@ -1,5 +1,10 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
+import {
+  canActForCustomer,
+  FORBIDDEN,
+} from "../../../application/auth/access-policy.js";
 import type { Checkout } from "../../../application/checkout/checkout.types.js";
+import { principalOf } from "../auth-guards.js";
 import { sendApplicationError } from "../http-errors.js";
 import { toCheckoutResponse } from "../presenters/checkout-presenter.js";
 import { checkoutBodySchema } from "../schemas/order-schemas.js";
@@ -49,6 +54,14 @@ export function createCheckoutController({
 
       if (!body.success || !idempotencyKey.ok) {
         reply.code(400).send({ message: "Invalid request" });
+        return;
+      }
+
+      const principal = principalOf(request);
+
+      // The cart being checked out must belong to the caller.
+      if (!canActForCustomer(principal, body.data.customerId)) {
+        sendApplicationError(reply, FORBIDDEN);
         return;
       }
 

@@ -5,19 +5,16 @@ import type { DomainEvent } from "../../../src/domain/shared/domain-event.js";
 import {
   createTestEnvironment,
   FIXED_NOW,
+  registerTestCustomer,
 } from "../../support/test-environment.js";
 
 async function stageCustomerEvent(
   environment: ReturnType<typeof createTestEnvironment>,
 ) {
-  const customer = await environment.useCases.createCustomer({
+  return registerTestCustomer(environment, {
     email: "linus@example.com",
     name: "Linus",
   });
-
-  if (!customer.ok) throw new Error("Expected a customer");
-
-  return customer.value;
 }
 
 function failingPublisher(): EventPublisher {

@@ -56,6 +56,14 @@ async function start(): Promise<void> {
               consumerGroup: config.value.kafkaConsumerGroup,
             },
       rateLimit: config.value.rateLimit,
+      auth: {
+        secret: config.value.auth.jwtSecret,
+        issuer: config.value.auth.jwtIssuer,
+        audience: config.value.auth.jwtAudience,
+        ttlSeconds: config.value.auth.accessTokenTtlSeconds,
+        rateLimit: config.value.auth.rateLimit,
+        bootstrapAdminEmails: config.value.auth.bootstrapAdminEmails,
+      },
     });
   } catch (error) {
     console.error(
@@ -75,7 +83,9 @@ async function start(): Promise<void> {
 
   const app = buildHttpApp({
     controllers,
+    tokens: container.tokens,
     rateLimiter: container.rateLimiter,
+    authRateLimiter: container.authRateLimiter,
     metrics: container.metrics,
     healthChecks: container.healthChecks,
   });
@@ -86,6 +96,9 @@ async function start(): Promise<void> {
       cache: config.value.redisUrl === null ? "memory" : "redis",
       events: config.value.kafkaBrokers === null ? "stdout" : "kafka",
       rateLimit: config.value.rateLimit,
+      auth: config.value.auth.usingDevelopmentSecret
+        ? "development-secret"
+        : "configured-secret",
     },
     "Adapters selected",
   );

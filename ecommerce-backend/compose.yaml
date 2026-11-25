@@ -88,6 +88,14 @@ services:
       KAFKA_CONSUMER_GROUP: ecommerce-order-events
       RATE_LIMIT_MAX: "120"
       RATE_LIMIT_WINDOW_SECONDS: "60"
+      AUTH_RATE_LIMIT_MAX: "10"
+      AUTH_RATE_LIMIT_WINDOW_SECONDS: "60"
+      # Local compose only. A real deployment must inject a random secret.
+      JWT_SECRET: ${JWT_SECRET:-local-compose-secret-change-me-32-chars}
+      JWT_ISSUER: ecommerce-backend
+      JWT_AUDIENCE: ecommerce-api
+      ACCESS_TOKEN_TTL_SECONDS: "900"
+      BOOTSTRAP_ADMIN_EMAILS: ${BOOTSTRAP_ADMIN_EMAILS:-owner@example.com}
       OUTBOX_POLL_INTERVAL_MS: "1000"
     ports:
       - "3000:3000"

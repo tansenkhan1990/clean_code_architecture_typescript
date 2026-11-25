@@ -1,12 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { createTestEnvironment } from "../../support/test-environment.js";
+import {
+  createTestEnvironment,
+  registerTestCustomer,
+} from "../../support/test-environment.js";
 
 async function seed(environment: ReturnType<typeof createTestEnvironment>) {
-  const customer = await environment.useCases.createCustomer({
+  const customer = await registerTestCustomer(environment, {
     email: "concurrent@example.com",
     name: "Concurrent",
   });
-  if (!customer.ok) throw new Error("Expected a customer");
 
   const product = await environment.useCases.createProduct({
     name: "One keyboard",
@@ -17,12 +19,12 @@ async function seed(environment: ReturnType<typeof createTestEnvironment>) {
   if (!product.ok) throw new Error("Expected a product");
 
   await environment.useCases.addItem({
-    customerId: customer.value.id,
+    customerId: customer.id,
     productId: product.value.id,
     quantity: 1,
   });
 
-  return customer.value;
+  return customer;
 }
 
 describe("concurrent checkout", () => {
@@ -70,19 +72,18 @@ describe("concurrent checkout", () => {
 
   it("releases the claim when an attempt fails, so the key can be reused", async () => {
     const environment = createTestEnvironment();
-    const customer = await environment.useCases.createCustomer({
+    const customer = await registerTestCustomer(environment, {
       email: "retry@example.com",
       name: "Retry",
     });
-    if (!customer.ok) throw new Error("Expected a customer");
 
     // No cart: the attempt fails before any money or stock moves.
     const first = await environment.useCases.checkout({
-      customerId: customer.value.id,
+      customerId: customer.id,
       idempotencyKey: "retry-me",
     });
     const second = await environment.useCases.checkout({
-      customerId: customer.value.id,
+      customerId: customer.id,
       idempotencyKey: "retry-me",
     });
 

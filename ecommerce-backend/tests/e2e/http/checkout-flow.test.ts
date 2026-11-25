@@ -1,11 +1,18 @@
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createTestHttpApp } from "../../support/test-environment.js";
+import {
+  createTestHttpApp,
+  TEST_PASSWORD,
+  type TestEnvironment,
+} from "../../support/test-environment.js";
 
 let app: FastifyInstance;
+let environment: TestEnvironment;
 
 beforeEach(async () => {
-  app = createTestHttpApp().app;
+  const created = createTestHttpApp();
+  app = created.app;
+  environment = created.environment;
   await app.ready();
 });
 
@@ -13,40 +20,58 @@ afterEach(async () => {
   await app.close();
 });
 
-async function createCustomer() {
+type Session = { id: string; token: string };
+
+async function registerCustomer(email = "Ada@example.com"): Promise<Session> {
   const response = await app.inject({
     method: "POST",
-    url: "/customers",
-    payload: { email: "Ada@example.com", name: "Ada" },
+    url: "/auth/register",
+    payload: { email, name: "Ada", password: TEST_PASSWORD },
   });
 
   expect(response.statusCode).toBe(201);
-  return response.json<{ id: string }>();
+
+  const body = response.json<{
+    customer: { id: string };
+    accessToken: { token: string };
+  }>();
+
+  return { id: body.customer.id, token: body.accessToken.token };
 }
 
+function auth(session: Session) {
+  return { authorization: `Bearer ${session.token}` };
+}
+
+/**
+ * Product creation is an admin action, so the flow seeds the catalogue through
+ * the use case instead of the API. The admin route itself is covered by
+ * `auth-flow.test.ts`.
+ */
 async function createProduct(availableQuantity: number) {
-  const response = await app.inject({
-    method: "POST",
-    url: "/products",
-    payload: {
-      name: "Mechanical keyboard",
-      price: { amountInMinorUnits: 1999, currency: "usd" },
-      availableQuantity,
-    },
+  const result = await environment.useCases.createProduct({
+    name: "Mechanical keyboard",
+    amountInMinorUnits: 1999,
+    currency: "usd",
+    availableQuantity,
   });
 
-  expect(response.statusCode).toBe(201);
-  return response.json<{ id: string }>();
+  if (!result.ok) {
+    throw new Error(result.error.message);
+  }
+
+  return result.value;
 }
 
 describe("http checkout flow", () => {
   it("runs customer to paid order through the API", async () => {
-    const customer = await createCustomer();
+    const customer = await registerCustomer();
     const product = await createProduct(5);
 
     const added = await app.inject({
       method: "POST",
       url: `/customers/${customer.id}/cart/items`,
+      headers: auth(customer),
       payload: { productId: product.id, quantity: 2 },
     });
 
@@ -55,6 +80,7 @@ describe("http checkout flow", () => {
     const cart = await app.inject({
       method: "GET",
       url: `/customers/${customer.id}/cart`,
+      headers: auth(customer),
     });
 
     expect(cart.statusCode).toBe(200);
@@ -66,6 +92,7 @@ describe("http checkout flow", () => {
     const checkout = await app.inject({
       method: "POST",
       url: "/checkout",
+      headers: auth(customer),
       payload: { customerId: customer.id },
     });
 
@@ -84,6 +111,7 @@ describe("http checkout flow", () => {
     const order = await app.inject({
       method: "GET",
       url: `/orders/${body.order.id}`,
+      headers: auth(customer),
     });
 
     expect(order.statusCode).toBe(200);
@@ -91,20 +119,21 @@ describe("http checkout flow", () => {
   });
 
   it("replays a checkout that carries an Idempotency-Key", async () => {
-    const customer = await createCustomer();
+    const customer = await registerCustomer();
     const product = await createProduct(5);
 
     await app.inject({
       method: "POST",
       url: `/customers/${customer.id}/cart/items`,
+      headers: auth(customer),
       payload: { productId: product.id, quantity: 2 },
     });
 
     const first = await app.inject({
       method: "POST",
       url: "/checkout",
+      headers: { ...auth(customer), "idempotency-key": "order-42" },
       payload: { customerId: customer.id },
-      headers: { "idempotency-key": "order-42" },
     });
 
     expect(first.statusCode).toBe(201);
@@ -116,8 +145,8 @@ describe("http checkout flow", () => {
     const second = await app.inject({
       method: "POST",
       url: "/checkout",
+      headers: { ...auth(customer), "idempotency-key": "order-42" },
       payload: { customerId: customer.id },
-      headers: { "idempotency-key": "order-42" },
     });
 
     expect(second.statusCode).toBe(200);
@@ -130,25 +159,26 @@ describe("http checkout flow", () => {
   });
 
   it("rejects a blank Idempotency-Key", async () => {
-    const customer = await createCustomer();
+    const customer = await registerCustomer();
 
     const response = await app.inject({
       method: "POST",
       url: "/checkout",
+      headers: { ...auth(customer), "idempotency-key": "   " },
       payload: { customerId: customer.id },
-      headers: { "idempotency-key": "   " },
     });
 
     expect(response.statusCode).toBe(400);
   });
 
   it("returns 409 when the cart asks for more than the stock", async () => {
-    const customer = await createCustomer();
+    const customer = await registerCustomer();
     const product = await createProduct(1);
 
     const added = await app.inject({
       method: "POST",
       url: `/customers/${customer.id}/cart/items`,
+      headers: auth(customer),
       payload: { productId: product.id, quantity: 2 },
     });
 
@@ -158,8 +188,14 @@ describe("http checkout flow", () => {
     });
   });
 
-  it("returns 404 for an unknown order and 400 for a malformed body", async () => {
-    const missing = await app.inject({ method: "GET", url: "/orders/nope" });
+  it("returns 404 for an unknown order, 400 for malformed input, and 401 without a token", async () => {
+    const customer = await registerCustomer();
+
+    const missing = await app.inject({
+      method: "GET",
+      url: "/orders/nope",
+      headers: auth(customer),
+    });
     expect(missing.statusCode).toBe(404);
 
     const malformed = await app.inject({
@@ -167,6 +203,13 @@ describe("http checkout flow", () => {
       url: "/products",
       payload: { name: "No price" },
     });
-    expect(malformed.statusCode).toBe(400);
+    // The route is admin-only, so the unauthenticated caller is refused first.
+    expect(malformed.statusCode).toBe(401);
+
+    const anonymous = await app.inject({
+      method: "GET",
+      url: `/customers/${customer.id}/cart`,
+    });
+    expect(anonymous.statusCode).toBe(401);
   });
 });

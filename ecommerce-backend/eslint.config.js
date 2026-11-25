@@ -28,6 +28,7 @@ const frameworks = [
   "zod",
   "ioredis",
   "kafkajs",
+  "jose",
   "prom-client",
   "@prisma/client",
 ];

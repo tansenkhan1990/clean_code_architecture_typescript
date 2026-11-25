@@ -1,5 +1,6 @@
 import type { InboxStore } from "../../../application/ports/inbox-store.js";
 import type { OutboxRepository } from "../../../application/ports/outbox.js";
+import type { AccountRepository } from "../../../application/ports/repositories/account-repository.js";
 import type { CartRepository } from "../../../application/ports/repositories/cart-repository.js";
 import type { CustomerRepository } from "../../../application/ports/repositories/customer-repository.js";
 import type { InventoryRepository } from "../../../application/ports/repositories/inventory-repository.js";
@@ -7,6 +8,7 @@ import type { OrderRepository } from "../../../application/ports/repositories/or
 import type { ProductRepository } from "../../../application/ports/repositories/product-repository.js";
 import type { UnitOfWork } from "../../../application/ports/unit-of-work.js";
 import { createPrismaUnitOfWork } from "../../transactions/prisma-unit-of-work.js";
+import { createPrismaAccountRepository } from "./prisma-account-repository.js";
 import { connectPrisma } from "./prisma-client.js";
 import { createPrismaCartRepository } from "./prisma-cart-repository.js";
 import { createPrismaCustomerRepository } from "./prisma-customer-repository.js";
@@ -18,6 +20,7 @@ import { createPrismaProductRepository } from "./prisma-product-repository.js";
 
 export type PersistenceDependencies = {
   customers: CustomerRepository;
+  accounts: AccountRepository;
   products: ProductRepository;
   inventory: InventoryRepository;
   carts: CartRepository;
@@ -45,6 +48,7 @@ export async function buildPrismaPersistence({
 
   return {
     customers: createPrismaCustomerRepository(connection.client),
+    accounts: createPrismaAccountRepository(connection.client),
     products: createPrismaProductRepository(connection.client),
     inventory: createPrismaInventoryRepository(connection.client),
     carts: createPrismaCartRepository(connection.client),

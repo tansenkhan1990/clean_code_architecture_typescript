@@ -2,18 +2,14 @@ import { describe, expect, it } from "vitest";
 import {
   createTestEnvironment,
   FIXED_NOW,
+  registerTestCustomer,
 } from "../../support/test-environment.js";
 
 async function seedCustomerAndProduct(
   environment: ReturnType<typeof createTestEnvironment>,
   availableQuantity: number,
 ) {
-  const customer = await environment.useCases.createCustomer({
-    email: "Ada@example.com",
-    name: "Ada",
-  });
-
-  if (!customer.ok) throw new Error("Expected a customer");
+  const customer = await registerTestCustomer(environment);
 
   const product = await environment.useCases.createProduct({
     name: "Mechanical keyboard",
@@ -24,7 +20,7 @@ async function seedCustomerAndProduct(
 
   if (!product.ok) throw new Error("Expected a product");
 
-  return { customer: customer.value, product: product.value };
+  return { customer, product: product.value };
 }
 
 function names(events: { name: string }[]): string[] {

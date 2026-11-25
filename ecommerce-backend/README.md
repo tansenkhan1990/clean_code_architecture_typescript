@@ -1,6 +1,8 @@
 # E-commerce Backend
 
-An e-commerce backend that demonstrates Clean Architecture with **functional TypeScript**, plus the operational pieces a real service needs. It covers the full purchase path — customer, product, stock, cart, order, payment — with Fastify for HTTP, Zod at the edge, Vitest for tests, PostgreSQL through Prisma at the persistence edge, and no classes and no DI container in the application.
+An e-commerce backend that demonstrates Clean Architecture with **functional TypeScript**, plus the operational pieces a real service needs. It covers the full purchase path — registration, login, product, stock, cart, order, payment — with Fastify for HTTP, Zod at the edge, Vitest for tests, PostgreSQL through Prisma at the persistence edge, and no classes and no DI container in the application.
+
+Identity is part of the model, not a route decorator: registration creates the profile and its credential in one transaction, passwords are scrypt-hashed, access tokens are short-lived HS256 JWTs, and authorization (ownership plus roles) is decided by a pure application policy.
 
 Every external dependency sits behind a port with an in-process adapter, so the whole flow runs and is tested with no infrastructure. Real adapters are selected by configuration, without changing a single use case:
 
@@ -12,16 +14,20 @@ Every external dependency sits behind a port with an in-process adapter, so the 
 | Rate limiting  | fixed window       | Redis + Lua                          |
 | Event delivery | stdout publisher   | Kafka producer (via outbox)          |
 | Consumer       | —                  | Kafka, idempotent by event id        |
+| Passwords      | scrypt (Node)      | scrypt (Node), same format           |
+| Access tokens  | HS256 JWT (`jose`) | HS256 JWT, secret from the platform  |
 | Metrics        | —                  | Prometheus `/metrics`                |
 
 The second goal is the part most Clean Architecture examples skip: **runtime consistency**. Multi-write workflows have explicit transaction boundaries, events leave through a transactional outbox, checkout is idempotent with an atomic claim, and delivery is at-least-once with an idempotent consumer.
 
 ```text
-POST   /customers
-GET    /customers/:id
-POST   /products
-GET    /products
-GET    /products/:id
+POST   /auth/register          (email, name, password → customer + bearer token)
+POST   /auth/login             (email, password → bearer token)
+GET    /auth/me                (current profile and role)
+GET    /customers/:id          (self or admin)
+POST   /products               (admin)
+GET    /products               (public)
+GET    /products/:id           (public)
 GET    /customers/:customerId/cart
 POST   /customers/:customerId/cart/items
 DELETE /customers/:customerId/cart/items/:productId
@@ -29,11 +35,13 @@ POST   /orders
 GET    /orders/:id
 POST   /orders/:id/cancel
 POST   /orders/:id/pay
-POST   /checkout              (optional Idempotency-Key header)
-GET    /health                (liveness)
-GET    /ready                 (readiness: postgres, redis, kafka)
-GET    /metrics               (Prometheus)
+POST   /checkout               (optional Idempotency-Key header)
+GET    /health                 (liveness)
+GET    /ready                  (readiness: postgres, redis, kafka)
+GET    /metrics                (Prometheus)
 ```
+
+Everything except `/auth/register`, `/auth/login`, the health/metrics endpoints, and the product catalogue requires `Authorization: Bearer <token>`. A customer may only touch its own cart, orders, and profile; an administrator may act for anyone.
 
 ## Quick start
 
@@ -41,10 +49,10 @@ GET    /metrics               (Prometheus)
 
 ```sh
 npm install
-npm run dev
+BOOTSTRAP_ADMIN_EMAILS=owner@example.com npm run dev
 ```
 
-The API listens on `http://localhost:3000` (override with `PORT`). With nothing configured, the composition root picks every in-process adapter and state resets on restart.
+The API listens on `http://localhost:3000` (override with `PORT`). With nothing configured, the composition root picks every in-process adapter and state resets on restart. The bootstrap variable is what lets the very first registration create a product; without it every account is a customer.
 
 ### Docker: API + PostgreSQL + Redis + Kafka + Prometheus
 
@@ -73,27 +81,35 @@ The image is a three-stage build (dependencies → compile → runtime), runs as
 
 ### Golden path
 
+`owner@example.com` is the bootstrap administrator in `compose.yaml`; for a local run set it with `BOOTSTRAP_ADMIN_EMAILS` as in the quick start.
+
 ```sh
-CUSTOMER=$(curl -s -X POST localhost:3000/customers \
+SESSION=$(curl -s -X POST localhost:3000/auth/register \
   -H 'Content-Type: application/json' \
-  -d '{"email":"ada@example.com","name":"Ada"}' | node -pe 'JSON.parse(require("fs").readFileSync(0)).id')
+  -d '{"email":"owner@example.com","name":"Owner","password":"correct horse battery staple"}')
+
+CUSTOMER=$(printf '%s' "$SESSION" | node -pe 'JSON.parse(require("fs").readFileSync(0)).customer.id')
+TOKEN=$(printf '%s' "$SESSION" | node -pe 'JSON.parse(require("fs").readFileSync(0)).accessToken.token')
 
 PRODUCT=$(curl -s -X POST localhost:3000/products \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"name":"Mechanical keyboard","price":{"amountInMinorUnits":1999,"currency":"usd"},"availableQuantity":5}' \
   | node -pe 'JSON.parse(require("fs").readFileSync(0)).id')
 
 curl -s -X POST localhost:3000/customers/$CUSTOMER/cart/items \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
   -d "{\"productId\":\"$PRODUCT\",\"quantity\":2}"
 
 curl -s -X POST localhost:3000/checkout \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Idempotency-Key: order-42' \
   -d "{\"customerId\":\"$CUSTOMER\"}"
 ```
 
-The response contains a `paid` order and a `succeeded` payment, the cart is emptied, and the reserved stock is committed. `order.created` / `order.paid` are written to the outbox in the same transaction, delivered by the worker, and (when Kafka is configured) consumed by the order-events consumer.
+The response contains a `paid` order and a `succeeded` payment, the cart is emptied, and the reserved stock is committed. Logging in again with the same address and password returns a fresh token via `/auth/login`. `order.created` / `order.paid` are written to the outbox in the same transaction, delivered by the worker, and (when Kafka is configured) consumed by the order-events consumer.
 
 Repeating the same `Idempotency-Key` returns the original order with `200`, an `idempotent-replay: true` header, and `"replayed": true`. Firing two requests with the same _new_ key simultaneously yields one `201` and one `409 checkout_in_progress` — never two charges.
 
@@ -112,6 +128,7 @@ npm run format:check
 npm run db:generate                     # regenerate the Prisma client after schema edits
 npm run db:migrate                      # apply pending migrations
 npm run db:migrate:dev                  # create a migration while developing
+npm run admin:grant -- ada@example.com  # grant the admin role to an existing account
 
 docker compose up --build               # everything
 docker compose up -d postgres redis kafka          # only the dependencies
@@ -123,18 +140,25 @@ docker compose down -v
 
 Parsed once, at the edge (`infrastructure/config/environment.ts`); nothing else reads `process.env`.
 
-| Variable                    | Default                  | Meaning                                                   |
-| --------------------------- | ------------------------ | --------------------------------------------------------- |
-| `PORT`                      | `3000`                   | HTTP port                                                 |
-| `NODE_ENV`                  | `development`            | `development \| test \| production`                       |
-| `DATABASE_URL`              | _(unset)_                | Unset → in-memory repositories; set → PostgreSQL          |
-| `REDIS_URL`                 | _(unset)_                | Unset → in-process cache/idempotency/limiter; set → Redis |
-| `KAFKA_BROKERS`             | _(unset)_                | Comma separated; unset → stdout publisher, no consumer    |
-| `KAFKA_CLIENT_ID`           | `ecommerce-backend`      | Kafka client id                                           |
-| `KAFKA_CONSUMER_GROUP`      | `ecommerce-order-events` | Consumer group                                            |
-| `RATE_LIMIT_MAX`            | `120`                    | Requests per caller per route per window                  |
-| `RATE_LIMIT_WINDOW_SECONDS` | `60`                     | Window length                                             |
-| `OUTBOX_POLL_INTERVAL_MS`   | `1000`                   | Outbox worker poll interval                               |
+| Variable                         | Default                  | Meaning                                                     |
+| -------------------------------- | ------------------------ | ----------------------------------------------------------- |
+| `PORT`                           | `3000`                   | HTTP port                                                   |
+| `NODE_ENV`                       | `development`            | `development \| test \| production`                         |
+| `DATABASE_URL`                   | _(unset)_                | Unset → in-memory repositories; set → PostgreSQL            |
+| `REDIS_URL`                      | _(unset)_                | Unset → in-process cache/idempotency/limiter; set → Redis   |
+| `KAFKA_BROKERS`                  | _(unset)_                | Comma separated; unset → stdout publisher, no consumer      |
+| `KAFKA_CLIENT_ID`                | `ecommerce-backend`      | Kafka client id                                             |
+| `KAFKA_CONSUMER_GROUP`           | `ecommerce-order-events` | Consumer group                                              |
+| `RATE_LIMIT_MAX`                 | `120`                    | Requests per caller per route per window                    |
+| `RATE_LIMIT_WINDOW_SECONDS`      | `60`                     | Window length                                               |
+| `JWT_SECRET`                     | dev fallback             | HS256 signing secret; **required in production**, ≥32 chars |
+| `JWT_ISSUER`                     | `ecommerce-backend`      | Issuer claim, verified on every request                     |
+| `JWT_AUDIENCE`                   | `ecommerce-api`          | Audience claim, verified on every request                   |
+| `ACCESS_TOKEN_TTL_SECONDS`       | `900`                    | Access token lifetime                                       |
+| `AUTH_RATE_LIMIT_MAX`            | `10`                     | Register/login attempts per caller per window               |
+| `AUTH_RATE_LIMIT_WINDOW_SECONDS` | `60`                     | Window for the auth budget                                  |
+| `BOOTSTRAP_ADMIN_EMAILS`         | _(empty)_                | Comma-separated addresses that register as admin            |
+| `OUTBOX_POLL_INTERVAL_MS`        | `1000`                   | Outbox worker poll interval                                 |
 
 From the host, point at the published ports and apply the migrations once:
 
@@ -152,19 +176,24 @@ npm run dev
 ```text
 src/
 ├── domain/                    entities, value objects, rules, events
+│   └── auth/                  account.ts (password policy, roles), role.ts
 ├── application/
+│   ├── auth/                  register/, login/, principal.ts, access-policy.ts
 │   ├── customer/ product/ cart/ order/ payment/ checkout/
 │   ├── outbox/                stage-event.ts, dispatch-outbox.ts, backoff.ts
 │   └── ports/
-│       ├── repositories/      customer, product, inventory, cart, order, outbox
+│       ├── repositories/      account, customer, product, inventory, cart, order, outbox
 │       ├── inbox-store.ts     durable consumer dedupe
+│       ├── password-hasher.ts, token-service.ts
 │       ├── unit-of-work.ts, idempotency-store.ts, rate-limiter.ts
 │       ├── payment-gateway.ts, event-publisher.ts, cache.ts
 │       └── id-generator.ts, clock.ts
 ├── infrastructure/
 │   ├── config/                environment.ts, config.ts
-│   ├── http/                  fastify.ts, http-errors.ts, health-routes.ts,
-│   │                          rate-limit.ts, controllers/, routes/, schemas/, presenters/
+│   ├── auth/                  scrypt-password-hasher.ts, jwt-token-service.ts
+│   ├── http/                  fastify.ts, http-errors.ts, auth-guards.ts,
+│   │                          health-routes.ts, rate-limit.ts,
+│   │                          controllers/, routes/, schemas/, presenters/
 │   ├── persistence/
 │   │   ├── in-memory/         store.ts
 │   │   ├── repositories/      in-memory-*.ts
@@ -185,6 +214,7 @@ src/
 │   └── system/                system-clock.ts, uuid-generator.ts
 └── main/
     ├── container.ts           composition root: adapters → use cases → controllers
+    ├── grant-admin.ts         operator command: grant the admin role
     └── server.ts              entry point: config, HTTP, worker, shutdown
 
 prisma/
@@ -213,7 +243,35 @@ Dockerfile, compose.yaml, .dockerignore
 | `infrastructure` | `application`, `domain`, adapters | `main`                                                        |
 | `main`           | anything inward                   | anything outside the graph; no business rules                 |
 
-`tests/architecture/dependency-rules.test.ts` reads the sources and fails on a framework import in `domain`/`application` (Fastify, Zod, Prisma, ioredis, KafkaJS, prom-client), an `infrastructure` → `main` import, or `process.env` / `Date.now` / `randomUUID` in the inner layers. The rules survive someone editing the ESLint config.
+`tests/architecture/dependency-rules.test.ts` reads the sources and fails on a framework import in `domain`/`application` (Fastify, Zod, Prisma, ioredis, KafkaJS, jose, prom-client), an `infrastructure` → `main` import, or `process.env` / `Date.now` / `randomUUID` in the inner layers. The rules survive someone editing the ESLint config. That is why hashing and JWT signing live in `infrastructure/auth` and the application only sees `PasswordHasher` and `TokenService`.
+
+## Authentication and authorization
+
+```text
+POST /auth/register ──► password policy (domain) ──► scrypt hash (outside the transaction)
+                          │
+                          ▼
+                    transaction { Customer + Account + customer.registered }
+                          │
+                          ▼
+                    access token (sub, email, role, iss, aud, exp)
+
+request ──► onRequest: verify bearer token ──► request.principal
+             │
+             ├─ requireAuth      → 401 without a valid token
+             ├─ requireAdmin     → 403 for a non-admin
+             └─ access policy    → 403 when the principal does not own the resource
+```
+
+- **One registration path.** `POST /auth/register` is the only way a customer is created; there is no endpoint that produces a profile without a credential. The profile, the credential row, and the `customer.registered` event commit together, so a half-registered account is impossible.
+- **Passwords.** scrypt with `N=2^15, r=8, p=1`, a random 16-byte salt per hash, and parameters embedded in the stored string so the cost can rise later without a migration. Verification uses `timingSafeEqual`. The policy is OWASP's 12-character floor and a 128-character ceiling; no composition rules.
+- **No account enumeration.** Unknown address, missing credential, and wrong password all return the same `401 invalid_credentials` message, and a missing account still spends one key derivation.
+- **Tokens.** HS256 JWTs with `sub` (customer id), `email`, `role`, plus `iss`/`aud`/`iat`/`exp`. Issuer and audience are verified, the algorithm is pinned, and a 5-second clock tolerance is allowed. Lifetime defaults to 15 minutes (`ACCESS_TOKEN_TTL_SECONDS`). The secret must be at least 32 characters and is **required in production**; development uses an obviously labelled fallback.
+- **Roles.** `customer` and `admin`, a closed set in the domain. Self-registration is customer-only, except addresses listed in `BOOTSTRAP_ADMIN_EMAILS` (the first administrator). Later elevation is `npm run admin:grant -- <email>`, which updates the `Account` row. A role change reaches the API at the next login, because the role is carried in the token.
+- **Ownership is a business rule.** `application/auth/access-policy.ts` decides whether a principal may act for a customer or read an order; controllers ask it, so the rule is unit-testable and not duplicated across routes. Route guards only answer "is there a principal" and "is it an admin".
+- **Credential endpoints are rate limited harder.** Register and login use `AUTH_RATE_LIMIT_MAX` (default 10/min per caller and route) on top of the general limiter, in-process or shared through Redis.
+- **Nothing sensitive is echoed.** Responses contain the profile and a token; password hashes never leave the process, and security headers (`nosniff`, `DENY`, `no-referrer`) are set on every response.
+- **Refusals are deliberately vague.** A caller who does not own a resource gets `403` with one message that reveals neither the resource nor its owner.
 
 ## Transactions
 
@@ -302,7 +360,9 @@ The in-memory adapters remain the default, which is what lets the unit tests run
 | Application error                                                                                                                                                             | HTTP          |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
 | `*_not_found`                                                                                                                                                                 | 404           |
-| `invalid_*`                                                                                                                                                                   | 400           |
+| `invalid_credentials`                                                                                                                                                         | 401           |
+| `forbidden`                                                                                                                                                                   | 403           |
+| `invalid_*` (except `invalid_credentials`)                                                                                                                                    | 400           |
 | `insufficient_stock`, `empty_cart`, `email_already_registered`, `order_already_paid`, `order_cancelled`, `item_not_in_cart`, `cart_currency_mismatch`, `checkout_in_progress` | 409           |
 | `payment_declined`                                                                                                                                                            | 402           |
 | `payment_gateway_unavailable`                                                                                                                                                 | 502           |
@@ -323,8 +383,11 @@ Server faults are logged once and answered as `{ "message": "Internal server err
 | Inbox        | `tests/unit/infrastructure/inbox-store.test.ts`                                     | First delivery wins; redelivery is reported as seen                                     |
 | Transactions | `tests/unit/infrastructure/unit-of-work.test.ts`                                    | Commit, rollback, thrown error, rollback inside a real use case                         |
 | Adapters     | `tests/unit/infrastructure/{kafka-messages,idempotency-store,rate-limiter}.test.ts` | Topic/partition mapping, claim semantics, window reset                                  |
+| Auth domain  | `tests/unit/domain/account.test.ts`                                                 | Password policy, credential shape, role changes                                         |
+| Auth cases   | `tests/unit/application/auth.test.ts`                                               | Registration transaction, duplicate refusal, login, enumeration-resistant failures      |
+| Auth HTTP    | `tests/e2e/http/auth-flow.test.ts`                                                  | Token round trip, 401/403, admin-only writes, cart/order ownership                      |
 | Platform     | `tests/e2e/http/platform-endpoints.test.ts`                                         | Readiness 200/503, metrics, request id echo, 429 + `Retry-After`                        |
-| PostgreSQL   | `tests/integration/prisma/prisma-persistence.test.ts`                               | Real transactions, JSON snapshots, rollback, durable backoff/DLQ, inbox claim           |
+| PostgreSQL   | `tests/integration/prisma/prisma-persistence.test.ts`                               | Real transactions (registration included), JSON snapshots, rollback, backoff/DLQ, inbox |
 | Redis        | `tests/integration/redis/redis-adapters.test.ts`                                    | Cache TTL, `SET NX` claim, shared limiter                                               |
 | Architecture | `tests/architecture/dependency-rules.test.ts`                                       | The dependency rule holds in the sources                                                |
 | E2E HTTP     | `tests/e2e/http/checkout-flow.test.ts`                                              | Real routes through `inject`: 201/200/409/404/400, replay header                        |
@@ -350,15 +413,21 @@ npm test
 - **Inbox rows are kept forever.** Dedupe is correct but unbounded; a retention job needs to delete ids older than the broker's retention window.
 - **No reconciliation job.** `payment_requires_reconciliation` is surfaced and logged; nothing retries the commit or refunds the charge yet.
 - **Payment is a stub.** `createInMemoryPaymentGateway` approves unless told to decline and remembers charges by idempotency key; a Stripe adapter implements the same port, with webhooks — not the request — confirming payment.
-- **No auth.** There are no identity or authorization rules, so nothing could honestly be enforced.
+- **No refresh tokens or revocation.** Access tokens are short-lived and stateless; there is no refresh/rotation pair, no logout server-side, and no "revoke all sessions" path. Rotating `JWT_SECRET` invalidates everything at once.
+- **No email verification, password reset, or MFA.** Registration trusts the address, and there is no out-of-band channel yet.
+- **Role changes lag one login.** The role is a token claim, so an elevation or demotion applies when the current access token expires.
+- **HS256 with a shared secret.** Fine for one service; multiple services should move to asymmetric keys (`RS256`/`ES256`) with a published JWKS.
+- **Login throttling is per IP and route.** That stops single-source guessing, not a distributed credential-stuffing attack; a per-account counter would be the next step.
+- **`/metrics` is unauthenticated.** Keep it on the internal network (or behind the platform's access control); the Prometheus sidecar expects plain HTTP.
 - **Single PostgreSQL instance and single Kafka broker.** Enough for correctness on one machine, not for production durability.
 - **Metrics, not traces.** Prometheus counters and a scrape config exist; OpenTelemetry spans across HTTP → PostgreSQL → outbox → Kafka do not.
 
 ### What to add next
 
 1. **Payment reconciliation** — a job that finds `payment_requires_reconciliation`, re-queries the provider, and commits or refunds.
-2. **Auth and RBAC** — JWT/cookie authentication at the HTTP boundary, authorization rules in the application (not only the routes).
-3. **OpenTelemetry** — spans across HTTP, Prisma, outbox, Kafka, consumer; logs correlated by `x-request-id`.
-4. **Grafana** — a provisioned dashboard for checkout outcomes, outbox lag, dead letters, p99 latency, rate-limit rejections.
-5. **Production deployment** — managed PostgreSQL with backups, multi-broker Kafka, TLS, secrets, horizontal scaling, rollout/rollback.
-6. **Retention and admin tooling** — inbox retention, dead-letter replay, and seed scripts for demo data.
+2. **Session lifecycle** — refresh tokens with rotation and reuse detection, plus a revocation list for logout and incident response.
+3. **Account lifecycle** — email verification, password reset, and per-account login throttling.
+4. **OpenTelemetry** — spans across HTTP, Prisma, outbox, Kafka, consumer; logs correlated by `x-request-id`.
+5. **Grafana** — a provisioned dashboard for checkout outcomes, outbox lag, dead letters, p99 latency, auth failures, rate-limit rejections.
+6. **Production deployment** — managed PostgreSQL with backups, multi-broker Kafka, TLS, secrets, horizontal scaling, rollout/rollback.
+7. **Retention and admin tooling** — inbox retention and dead-letter replay.

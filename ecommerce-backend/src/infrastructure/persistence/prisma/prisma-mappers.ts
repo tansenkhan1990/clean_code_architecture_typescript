@@ -1,5 +1,7 @@
 import type { Prisma } from "@prisma/client";
 import type { OutboxMessage } from "../../../application/ports/outbox.js";
+import type { Account } from "../../../domain/auth/account.js";
+import { isRole } from "../../../domain/auth/role.js";
 import type { Cart as CartAggregate } from "../../../domain/cart/cart.js";
 import type { CartItem } from "../../../domain/cart/cart-item.js";
 import type { Customer } from "../../../domain/customer/customer.js";
@@ -44,6 +46,36 @@ export function toCustomerRow(customer: Customer) {
     email: customer.email,
     name: customer.name,
     createdAt: toDate(customer.createdAt),
+  };
+}
+
+export type AccountRow = {
+  customerId: string;
+  passwordHash: string;
+  role: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export function fromAccountRow(row: AccountRow): Account {
+  return {
+    customerId: row.customerId,
+    passwordHash: row.passwordHash,
+    // An unreadable role is downgraded, never guessed upward: a corrupted row
+    // must not become an administrator.
+    role: isRole(row.role) ? row.role : "customer",
+    createdAt: toIso(row.createdAt),
+    updatedAt: toIso(row.updatedAt),
+  };
+}
+
+export function toAccountRow(account: Account) {
+  return {
+    customerId: account.customerId,
+    passwordHash: account.passwordHash,
+    role: account.role,
+    createdAt: toDate(account.createdAt),
+    updatedAt: toDate(account.updatedAt),
   };
 }
 

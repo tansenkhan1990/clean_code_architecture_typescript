@@ -14,8 +14,8 @@ README.md
 compose.yaml
 Dockerfile
 .dockerignore
-````
 
+````
 ````ecommerce-backend/.env.example
 PORT=3000
 # development | test | production
@@ -33,17 +33,33 @@ NODE_ENV=development
 KAFKA_CLIENT_ID=ecommerce-backend
 KAFKA_CONSUMER_GROUP=ecommerce-order-events
 
+# JWT signing. Required in production (at least 32 characters); development
+# falls back to a clearly-marked local secret. Generate one with:
+#   node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"
+# JWT_SECRET=change-me-to-a-random-48-byte-secret
+JWT_ISSUER=ecommerce-backend
+JWT_AUDIENCE=ecommerce-api
+ACCESS_TOKEN_TTL_SECONDS=900
+
+# First administrator: this address gets the admin role when it registers.
+# Remove it after the account exists; `npm run admin:grant` handles later ones.
+# BOOTSTRAP_ADMIN_EMAILS=owner@example.com
+
 # Fixed-window rate limit per caller and route.
 RATE_LIMIT_MAX=120
 RATE_LIMIT_WINDOW_SECONDS=60
+
+# Stricter budget for /auth/register and /auth/login (credential stuffing).
+AUTH_RATE_LIMIT_MAX=10
+AUTH_RATE_LIMIT_WINDOW_SECONDS=60
 
 # How often the outbox worker drains a batch.
 OUTBOX_POLL_INTERVAL_MS=1000
 
 # Later adapters read their own settings here:
 # STRIPE_SECRET_KEY=sk_test_...
-````
 
+````
 ````ecommerce-backend/.github/workflows/ci.yml
 name: CI
 
@@ -101,8 +117,8 @@ jobs:
 
       - name: Build the production image
         run: docker build -t ecommerce-backend:ci .
-````
 
+````
 ````ecommerce-backend/.gitignore
 node_modules/
 dist/
@@ -110,16 +126,8 @@ coverage/
 .env
 *.log
 .DS_Store
-````
 
-````ecommerce-backend/.smoke-code-a
-409
 ````
-
-````ecommerce-backend/.smoke-code-b
-201
-````
-
 ````ecommerce-backend/Dockerfile
 # syntax=docker/dockerfile:1
 
@@ -160,12 +168,14 @@ HEALTHCHECK --interval=10s --timeout=3s --start-period=10s --retries=5 \
 
 # `migrate deploy` is idempotent; it applies pending migrations, then serves.
 CMD ["sh", "-c", "npx prisma migrate deploy && node dist/main/server.js"]
-````
 
+````
 `````ecommerce-backend/README.md
 # E-commerce Backend
 
-An e-commerce backend that demonstrates Clean Architecture with **functional TypeScript**, plus the operational pieces a real service needs. It covers the full purchase path — customer, product, stock, cart, order, payment — with Fastify for HTTP, Zod at the edge, Vitest for tests, PostgreSQL through Prisma at the persistence edge, and no classes and no DI container in the application.
+An e-commerce backend that demonstrates Clean Architecture with **functional TypeScript**, plus the operational pieces a real service needs. It covers the full purchase path — registration, login, product, stock, cart, order, payment — with Fastify for HTTP, Zod at the edge, Vitest for tests, PostgreSQL through Prisma at the persistence edge, and no classes and no DI container in the application.
+
+Identity is part of the model, not a route decorator: registration creates the profile and its credential in one transaction, passwords are scrypt-hashed, access tokens are short-lived HS256 JWTs, and authorization (ownership plus roles) is decided by a pure application policy.
 
 Every external dependency sits behind a port with an in-process adapter, so the whole flow runs and is tested with no infrastructure. Real adapters are selected by configuration, without changing a single use case:
 
@@ -177,16 +187,20 @@ Every external dependency sits behind a port with an in-process adapter, so the 
 | Rate limiting  | fixed window       | Redis + Lua                          |
 | Event delivery | stdout publisher   | Kafka producer (via outbox)          |
 | Consumer       | —                  | Kafka, idempotent by event id        |
+| Passwords      | scrypt (Node)      | scrypt (Node), same format           |
+| Access tokens  | HS256 JWT (`jose`) | HS256 JWT, secret from the platform  |
 | Metrics        | —                  | Prometheus `/metrics`                |
 
 The second goal is the part most Clean Architecture examples skip: **runtime consistency**. Multi-write workflows have explicit transaction boundaries, events leave through a transactional outbox, checkout is idempotent with an atomic claim, and delivery is at-least-once with an idempotent consumer.
 
 ```text
-POST   /customers
-GET    /customers/:id
-POST   /products
-GET    /products
-GET    /products/:id
+POST   /auth/register          (email, name, password → customer + bearer token)
+POST   /auth/login             (email, password → bearer token)
+GET    /auth/me                (current profile and role)
+GET    /customers/:id          (self or admin)
+POST   /products               (admin)
+GET    /products               (public)
+GET    /products/:id           (public)
 GET    /customers/:customerId/cart
 POST   /customers/:customerId/cart/items
 DELETE /customers/:customerId/cart/items/:productId
@@ -194,11 +208,13 @@ POST   /orders
 GET    /orders/:id
 POST   /orders/:id/cancel
 POST   /orders/:id/pay
-POST   /checkout              (optional Idempotency-Key header)
-GET    /health                (liveness)
-GET    /ready                 (readiness: postgres, redis, kafka)
-GET    /metrics               (Prometheus)
+POST   /checkout               (optional Idempotency-Key header)
+GET    /health                 (liveness)
+GET    /ready                  (readiness: postgres, redis, kafka)
+GET    /metrics                (Prometheus)
 ```
+
+Everything except `/auth/register`, `/auth/login`, the health/metrics endpoints, and the product catalogue requires `Authorization: Bearer <token>`. A customer may only touch its own cart, orders, and profile; an administrator may act for anyone.
 
 ## Quick start
 
@@ -206,10 +222,10 @@ GET    /metrics               (Prometheus)
 
 ```sh
 npm install
-npm run dev
+BOOTSTRAP_ADMIN_EMAILS=owner@example.com npm run dev
 ```
 
-The API listens on `http://localhost:3000` (override with `PORT`). With nothing configured, the composition root picks every in-process adapter and state resets on restart.
+The API listens on `http://localhost:3000` (override with `PORT`). With nothing configured, the composition root picks every in-process adapter and state resets on restart. The bootstrap variable is what lets the very first registration create a product; without it every account is a customer.
 
 ### Docker: API + PostgreSQL + Redis + Kafka + Prometheus
 
@@ -238,27 +254,35 @@ The image is a three-stage build (dependencies → compile → runtime), runs as
 
 ### Golden path
 
+`owner@example.com` is the bootstrap administrator in `compose.yaml`; for a local run set it with `BOOTSTRAP_ADMIN_EMAILS` as in the quick start.
+
 ```sh
-CUSTOMER=$(curl -s -X POST localhost:3000/customers \
+SESSION=$(curl -s -X POST localhost:3000/auth/register \
   -H 'Content-Type: application/json' \
-  -d '{"email":"ada@example.com","name":"Ada"}' | node -pe 'JSON.parse(require("fs").readFileSync(0)).id')
+  -d '{"email":"owner@example.com","name":"Owner","password":"correct horse battery staple"}')
+
+CUSTOMER=$(printf '%s' "$SESSION" | node -pe 'JSON.parse(require("fs").readFileSync(0)).customer.id')
+TOKEN=$(printf '%s' "$SESSION" | node -pe 'JSON.parse(require("fs").readFileSync(0)).accessToken.token')
 
 PRODUCT=$(curl -s -X POST localhost:3000/products \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"name":"Mechanical keyboard","price":{"amountInMinorUnits":1999,"currency":"usd"},"availableQuantity":5}' \
   | node -pe 'JSON.parse(require("fs").readFileSync(0)).id')
 
 curl -s -X POST localhost:3000/customers/$CUSTOMER/cart/items \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
   -d "{\"productId\":\"$PRODUCT\",\"quantity\":2}"
 
 curl -s -X POST localhost:3000/checkout \
   -H 'Content-Type: application/json' \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Idempotency-Key: order-42' \
   -d "{\"customerId\":\"$CUSTOMER\"}"
 ```
 
-The response contains a `paid` order and a `succeeded` payment, the cart is emptied, and the reserved stock is committed. `order.created` / `order.paid` are written to the outbox in the same transaction, delivered by the worker, and (when Kafka is configured) consumed by the order-events consumer.
+The response contains a `paid` order and a `succeeded` payment, the cart is emptied, and the reserved stock is committed. Logging in again with the same address and password returns a fresh token via `/auth/login`. `order.created` / `order.paid` are written to the outbox in the same transaction, delivered by the worker, and (when Kafka is configured) consumed by the order-events consumer.
 
 Repeating the same `Idempotency-Key` returns the original order with `200`, an `idempotent-replay: true` header, and `"replayed": true`. Firing two requests with the same _new_ key simultaneously yields one `201` and one `409 checkout_in_progress` — never two charges.
 
@@ -277,6 +301,7 @@ npm run format:check
 npm run db:generate                     # regenerate the Prisma client after schema edits
 npm run db:migrate                      # apply pending migrations
 npm run db:migrate:dev                  # create a migration while developing
+npm run admin:grant -- ada@example.com  # grant the admin role to an existing account
 
 docker compose up --build               # everything
 docker compose up -d postgres redis kafka          # only the dependencies
@@ -288,18 +313,25 @@ docker compose down -v
 
 Parsed once, at the edge (`infrastructure/config/environment.ts`); nothing else reads `process.env`.
 
-| Variable                    | Default                  | Meaning                                                   |
-| --------------------------- | ------------------------ | --------------------------------------------------------- |
-| `PORT`                      | `3000`                   | HTTP port                                                 |
-| `NODE_ENV`                  | `development`            | `development \| test \| production`                       |
-| `DATABASE_URL`              | _(unset)_                | Unset → in-memory repositories; set → PostgreSQL          |
-| `REDIS_URL`                 | _(unset)_                | Unset → in-process cache/idempotency/limiter; set → Redis |
-| `KAFKA_BROKERS`             | _(unset)_                | Comma separated; unset → stdout publisher, no consumer    |
-| `KAFKA_CLIENT_ID`           | `ecommerce-backend`      | Kafka client id                                           |
-| `KAFKA_CONSUMER_GROUP`      | `ecommerce-order-events` | Consumer group                                            |
-| `RATE_LIMIT_MAX`            | `120`                    | Requests per caller per route per window                  |
-| `RATE_LIMIT_WINDOW_SECONDS` | `60`                     | Window length                                             |
-| `OUTBOX_POLL_INTERVAL_MS`   | `1000`                   | Outbox worker poll interval                               |
+| Variable                         | Default                  | Meaning                                                     |
+| -------------------------------- | ------------------------ | ----------------------------------------------------------- |
+| `PORT`                           | `3000`                   | HTTP port                                                   |
+| `NODE_ENV`                       | `development`            | `development \| test \| production`                         |
+| `DATABASE_URL`                   | _(unset)_                | Unset → in-memory repositories; set → PostgreSQL            |
+| `REDIS_URL`                      | _(unset)_                | Unset → in-process cache/idempotency/limiter; set → Redis   |
+| `KAFKA_BROKERS`                  | _(unset)_                | Comma separated; unset → stdout publisher, no consumer      |
+| `KAFKA_CLIENT_ID`                | `ecommerce-backend`      | Kafka client id                                             |
+| `KAFKA_CONSUMER_GROUP`           | `ecommerce-order-events` | Consumer group                                              |
+| `RATE_LIMIT_MAX`                 | `120`                    | Requests per caller per route per window                    |
+| `RATE_LIMIT_WINDOW_SECONDS`      | `60`                     | Window length                                               |
+| `JWT_SECRET`                     | dev fallback             | HS256 signing secret; **required in production**, ≥32 chars |
+| `JWT_ISSUER`                     | `ecommerce-backend`      | Issuer claim, verified on every request                     |
+| `JWT_AUDIENCE`                   | `ecommerce-api`          | Audience claim, verified on every request                   |
+| `ACCESS_TOKEN_TTL_SECONDS`       | `900`                    | Access token lifetime                                       |
+| `AUTH_RATE_LIMIT_MAX`            | `10`                     | Register/login attempts per caller per window               |
+| `AUTH_RATE_LIMIT_WINDOW_SECONDS` | `60`                     | Window for the auth budget                                  |
+| `BOOTSTRAP_ADMIN_EMAILS`         | _(empty)_                | Comma-separated addresses that register as admin            |
+| `OUTBOX_POLL_INTERVAL_MS`        | `1000`                   | Outbox worker poll interval                                 |
 
 From the host, point at the published ports and apply the migrations once:
 
@@ -317,19 +349,24 @@ npm run dev
 ```text
 src/
 ├── domain/                    entities, value objects, rules, events
+│   └── auth/                  account.ts (password policy, roles), role.ts
 ├── application/
+│   ├── auth/                  register/, login/, principal.ts, access-policy.ts
 │   ├── customer/ product/ cart/ order/ payment/ checkout/
 │   ├── outbox/                stage-event.ts, dispatch-outbox.ts, backoff.ts
 │   └── ports/
-│       ├── repositories/      customer, product, inventory, cart, order, outbox
+│       ├── repositories/      account, customer, product, inventory, cart, order, outbox
 │       ├── inbox-store.ts     durable consumer dedupe
+│       ├── password-hasher.ts, token-service.ts
 │       ├── unit-of-work.ts, idempotency-store.ts, rate-limiter.ts
 │       ├── payment-gateway.ts, event-publisher.ts, cache.ts
 │       └── id-generator.ts, clock.ts
 ├── infrastructure/
 │   ├── config/                environment.ts, config.ts
-│   ├── http/                  fastify.ts, http-errors.ts, health-routes.ts,
-│   │                          rate-limit.ts, controllers/, routes/, schemas/, presenters/
+│   ├── auth/                  scrypt-password-hasher.ts, jwt-token-service.ts
+│   ├── http/                  fastify.ts, http-errors.ts, auth-guards.ts,
+│   │                          health-routes.ts, rate-limit.ts,
+│   │                          controllers/, routes/, schemas/, presenters/
 │   ├── persistence/
 │   │   ├── in-memory/         store.ts
 │   │   ├── repositories/      in-memory-*.ts
@@ -350,6 +387,7 @@ src/
 │   └── system/                system-clock.ts, uuid-generator.ts
 └── main/
     ├── container.ts           composition root: adapters → use cases → controllers
+    ├── grant-admin.ts         operator command: grant the admin role
     └── server.ts              entry point: config, HTTP, worker, shutdown
 
 prisma/
@@ -378,7 +416,35 @@ Dockerfile, compose.yaml, .dockerignore
 | `infrastructure` | `application`, `domain`, adapters | `main`                                                        |
 | `main`           | anything inward                   | anything outside the graph; no business rules                 |
 
-`tests/architecture/dependency-rules.test.ts` reads the sources and fails on a framework import in `domain`/`application` (Fastify, Zod, Prisma, ioredis, KafkaJS, prom-client), an `infrastructure` → `main` import, or `process.env` / `Date.now` / `randomUUID` in the inner layers. The rules survive someone editing the ESLint config.
+`tests/architecture/dependency-rules.test.ts` reads the sources and fails on a framework import in `domain`/`application` (Fastify, Zod, Prisma, ioredis, KafkaJS, jose, prom-client), an `infrastructure` → `main` import, or `process.env` / `Date.now` / `randomUUID` in the inner layers. The rules survive someone editing the ESLint config. That is why hashing and JWT signing live in `infrastructure/auth` and the application only sees `PasswordHasher` and `TokenService`.
+
+## Authentication and authorization
+
+```text
+POST /auth/register ──► password policy (domain) ──► scrypt hash (outside the transaction)
+                          │
+                          ▼
+                    transaction { Customer + Account + customer.registered }
+                          │
+                          ▼
+                    access token (sub, email, role, iss, aud, exp)
+
+request ──► onRequest: verify bearer token ──► request.principal
+             │
+             ├─ requireAuth      → 401 without a valid token
+             ├─ requireAdmin     → 403 for a non-admin
+             └─ access policy    → 403 when the principal does not own the resource
+```
+
+- **One registration path.** `POST /auth/register` is the only way a customer is created; there is no endpoint that produces a profile without a credential. The profile, the credential row, and the `customer.registered` event commit together, so a half-registered account is impossible.
+- **Passwords.** scrypt with `N=2^15, r=8, p=1`, a random 16-byte salt per hash, and parameters embedded in the stored string so the cost can rise later without a migration. Verification uses `timingSafeEqual`. The policy is OWASP's 12-character floor and a 128-character ceiling; no composition rules.
+- **No account enumeration.** Unknown address, missing credential, and wrong password all return the same `401 invalid_credentials` message, and a missing account still spends one key derivation.
+- **Tokens.** HS256 JWTs with `sub` (customer id), `email`, `role`, plus `iss`/`aud`/`iat`/`exp`. Issuer and audience are verified, the algorithm is pinned, and a 5-second clock tolerance is allowed. Lifetime defaults to 15 minutes (`ACCESS_TOKEN_TTL_SECONDS`). The secret must be at least 32 characters and is **required in production**; development uses an obviously labelled fallback.
+- **Roles.** `customer` and `admin`, a closed set in the domain. Self-registration is customer-only, except addresses listed in `BOOTSTRAP_ADMIN_EMAILS` (the first administrator). Later elevation is `npm run admin:grant -- <email>`, which updates the `Account` row. A role change reaches the API at the next login, because the role is carried in the token.
+- **Ownership is a business rule.** `application/auth/access-policy.ts` decides whether a principal may act for a customer or read an order; controllers ask it, so the rule is unit-testable and not duplicated across routes. Route guards only answer "is there a principal" and "is it an admin".
+- **Credential endpoints are rate limited harder.** Register and login use `AUTH_RATE_LIMIT_MAX` (default 10/min per caller and route) on top of the general limiter, in-process or shared through Redis.
+- **Nothing sensitive is echoed.** Responses contain the profile and a token; password hashes never leave the process, and security headers (`nosniff`, `DENY`, `no-referrer`) are set on every response.
+- **Refusals are deliberately vague.** A caller who does not own a resource gets `403` with one message that reveals neither the resource nor its owner.
 
 ## Transactions
 
@@ -467,7 +533,9 @@ The in-memory adapters remain the default, which is what lets the unit tests run
 | Application error                                                                                                                                                             | HTTP          |
 | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------- |
 | `*_not_found`                                                                                                                                                                 | 404           |
-| `invalid_*`                                                                                                                                                                   | 400           |
+| `invalid_credentials`                                                                                                                                                         | 401           |
+| `forbidden`                                                                                                                                                                   | 403           |
+| `invalid_*` (except `invalid_credentials`)                                                                                                                                    | 400           |
 | `insufficient_stock`, `empty_cart`, `email_already_registered`, `order_already_paid`, `order_cancelled`, `item_not_in_cart`, `cart_currency_mismatch`, `checkout_in_progress` | 409           |
 | `payment_declined`                                                                                                                                                            | 402           |
 | `payment_gateway_unavailable`                                                                                                                                                 | 502           |
@@ -488,8 +556,11 @@ Server faults are logged once and answered as `{ "message": "Internal server err
 | Inbox        | `tests/unit/infrastructure/inbox-store.test.ts`                                     | First delivery wins; redelivery is reported as seen                                     |
 | Transactions | `tests/unit/infrastructure/unit-of-work.test.ts`                                    | Commit, rollback, thrown error, rollback inside a real use case                         |
 | Adapters     | `tests/unit/infrastructure/{kafka-messages,idempotency-store,rate-limiter}.test.ts` | Topic/partition mapping, claim semantics, window reset                                  |
+| Auth domain  | `tests/unit/domain/account.test.ts`                                                 | Password policy, credential shape, role changes                                         |
+| Auth cases   | `tests/unit/application/auth.test.ts`                                               | Registration transaction, duplicate refusal, login, enumeration-resistant failures      |
+| Auth HTTP    | `tests/e2e/http/auth-flow.test.ts`                                                  | Token round trip, 401/403, admin-only writes, cart/order ownership                      |
 | Platform     | `tests/e2e/http/platform-endpoints.test.ts`                                         | Readiness 200/503, metrics, request id echo, 429 + `Retry-After`                        |
-| PostgreSQL   | `tests/integration/prisma/prisma-persistence.test.ts`                               | Real transactions, JSON snapshots, rollback, durable backoff/DLQ, inbox claim           |
+| PostgreSQL   | `tests/integration/prisma/prisma-persistence.test.ts`                               | Real transactions (registration included), JSON snapshots, rollback, backoff/DLQ, inbox |
 | Redis        | `tests/integration/redis/redis-adapters.test.ts`                                    | Cache TTL, `SET NX` claim, shared limiter                                               |
 | Architecture | `tests/architecture/dependency-rules.test.ts`                                       | The dependency rule holds in the sources                                                |
 | E2E HTTP     | `tests/e2e/http/checkout-flow.test.ts`                                              | Real routes through `inject`: 201/200/409/404/400, replay header                        |
@@ -515,20 +586,26 @@ npm test
 - **Inbox rows are kept forever.** Dedupe is correct but unbounded; a retention job needs to delete ids older than the broker's retention window.
 - **No reconciliation job.** `payment_requires_reconciliation` is surfaced and logged; nothing retries the commit or refunds the charge yet.
 - **Payment is a stub.** `createInMemoryPaymentGateway` approves unless told to decline and remembers charges by idempotency key; a Stripe adapter implements the same port, with webhooks — not the request — confirming payment.
-- **No auth.** There are no identity or authorization rules, so nothing could honestly be enforced.
+- **No refresh tokens or revocation.** Access tokens are short-lived and stateless; there is no refresh/rotation pair, no logout server-side, and no "revoke all sessions" path. Rotating `JWT_SECRET` invalidates everything at once.
+- **No email verification, password reset, or MFA.** Registration trusts the address, and there is no out-of-band channel yet.
+- **Role changes lag one login.** The role is a token claim, so an elevation or demotion applies when the current access token expires.
+- **HS256 with a shared secret.** Fine for one service; multiple services should move to asymmetric keys (`RS256`/`ES256`) with a published JWKS.
+- **Login throttling is per IP and route.** That stops single-source guessing, not a distributed credential-stuffing attack; a per-account counter would be the next step.
+- **`/metrics` is unauthenticated.** Keep it on the internal network (or behind the platform's access control); the Prometheus sidecar expects plain HTTP.
 - **Single PostgreSQL instance and single Kafka broker.** Enough for correctness on one machine, not for production durability.
 - **Metrics, not traces.** Prometheus counters and a scrape config exist; OpenTelemetry spans across HTTP → PostgreSQL → outbox → Kafka do not.
 
 ### What to add next
 
 1. **Payment reconciliation** — a job that finds `payment_requires_reconciliation`, re-queries the provider, and commits or refunds.
-2. **Auth and RBAC** — JWT/cookie authentication at the HTTP boundary, authorization rules in the application (not only the routes).
-3. **OpenTelemetry** — spans across HTTP, Prisma, outbox, Kafka, consumer; logs correlated by `x-request-id`.
-4. **Grafana** — a provisioned dashboard for checkout outcomes, outbox lag, dead letters, p99 latency, rate-limit rejections.
-5. **Production deployment** — managed PostgreSQL with backups, multi-broker Kafka, TLS, secrets, horizontal scaling, rollout/rollback.
-6. **Retention and admin tooling** — inbox retention, dead-letter replay, and seed scripts for demo data.
-`````
+2. **Session lifecycle** — refresh tokens with rotation and reuse detection, plus a revocation list for logout and incident response.
+3. **Account lifecycle** — email verification, password reset, and per-account login throttling.
+4. **OpenTelemetry** — spans across HTTP, Prisma, outbox, Kafka, consumer; logs correlated by `x-request-id`.
+5. **Grafana** — a provisioned dashboard for checkout outcomes, outbox lag, dead letters, p99 latency, auth failures, rate-limit rejections.
+6. **Production deployment** — managed PostgreSQL with backups, multi-broker Kafka, TLS, secrets, horizontal scaling, rollout/rollback.
+7. **Retention and admin tooling** — inbox retention and dead-letter replay.
 
+`````
 ````ecommerce-backend/compose.yaml
 name: ecommerce-backend
 
@@ -620,6 +697,14 @@ services:
       KAFKA_CONSUMER_GROUP: ecommerce-order-events
       RATE_LIMIT_MAX: "120"
       RATE_LIMIT_WINDOW_SECONDS: "60"
+      AUTH_RATE_LIMIT_MAX: "10"
+      AUTH_RATE_LIMIT_WINDOW_SECONDS: "60"
+      # Local compose only. A real deployment must inject a random secret.
+      JWT_SECRET: ${JWT_SECRET:-local-compose-secret-change-me-32-chars}
+      JWT_ISSUER: ecommerce-backend
+      JWT_AUDIENCE: ecommerce-api
+      ACCESS_TOKEN_TTL_SECONDS: "900"
+      BOOTSTRAP_ADMIN_EMAILS: ${BOOTSTRAP_ADMIN_EMAILS:-owner@example.com}
       OUTBOX_POLL_INTERVAL_MS: "1000"
     ports:
       - "3000:3000"
@@ -628,8 +713,8 @@ services:
 volumes:
   postgres-data:
   redis-data:
-````
 
+````
 ````ecommerce-backend/docker/prometheus/prometheus.yml
 global:
   scrape_interval: 15s
@@ -640,8 +725,8 @@ scrape_configs:
     metrics_path: /metrics
     static_configs:
       - targets: ["app:3000"]
-````
 
+````
 ````ecommerce-backend/eslint.config.js
 import js from "@eslint/js";
 import globals from "globals";
@@ -673,6 +758,7 @@ const frameworks = [
   "zod",
   "ioredis",
   "kafkajs",
+  "jose",
   "prom-client",
   "@prisma/client",
 ];
@@ -715,8 +801,8 @@ export default tseslint.config(
     ),
   },
 );
-````
 
+````
 ````ecommerce-backend/package.json
 {
   "name": "ecommerce-backend",
@@ -738,6 +824,7 @@ export default tseslint.config(
     "db:migrate": "prisma migrate deploy",
     "db:migrate:dev": "prisma migrate dev",
     "db:generate": "prisma generate",
+    "admin:grant": "tsx src/main/grant-admin.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
@@ -747,6 +834,7 @@ export default tseslint.config(
     "@prisma/client": "^6.19.3",
     "fastify": "^5.12.8",
     "ioredis": "^5.11.1",
+    "jose": "^6.2.18",
     "kafkajs": "^2.2.4",
     "prisma": "^6.19.3",
     "prom-client": "^15.1.3",
@@ -764,8 +852,8 @@ export default tseslint.config(
     "vitest": "^5.1.1"
   }
 }
-````
 
+````
 ````ecommerce-backend/prisma/migrations/20261125120537_init/migration.sql
 -- CreateTable
 CREATE TABLE "Customer" (
@@ -865,14 +953,30 @@ CREATE INDEX "Order_customerId_idx" ON "Order"("customerId");
 
 -- CreateIndex
 CREATE INDEX "OutboxMessage_publishedAt_deadLetteredAt_nextAttemptAt_idx" ON "OutboxMessage"("publishedAt", "deadLetteredAt", "nextAttemptAt");
-````
 
+````
+````ecommerce-backend/prisma/migrations/20261125143000_add_account/migration.sql
+-- CreateTable
+CREATE TABLE "Account" (
+    "customerId" TEXT NOT NULL,
+    "passwordHash" TEXT NOT NULL,
+    "role" TEXT NOT NULL DEFAULT 'customer',
+    "createdAt" TIMESTAMPTZ(3) NOT NULL,
+    "updatedAt" TIMESTAMPTZ(3) NOT NULL,
+
+    CONSTRAINT "Account_pkey" PRIMARY KEY ("customerId")
+);
+
+-- AddForeignKey
+ALTER TABLE "Account" ADD CONSTRAINT "Account_customerId_fkey" FOREIGN KEY ("customerId") REFERENCES "Customer"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+````
 ````ecommerce-backend/prisma/migrations/migration_lock.toml
 # Please do not edit this file manually
 # It should be added in your version-control system (e.g., Git)
 provider = "postgresql"
-````
 
+````
 ````ecommerce-backend/prisma/schema.prisma
 // PostgreSQL schema. Domain timestamps are ISO-8601 strings in TypeScript;
 // they are stored as timestamptz here and converted by the mappers, so the
@@ -891,6 +995,20 @@ model Customer {
   email     String   @unique
   name      String
   createdAt DateTime @db.Timestamptz(3)
+  account   Account?
+}
+
+// One credential record per customer. The hash is opaque here: the algorithm
+// and its parameters live inside the string, owned by the hashing adapter.
+// `role` is a closed set in the domain, and self-registration can only store
+// "customer"; elevation is an explicit operator command.
+model Account {
+  customerId   String   @id
+  passwordHash String
+  role         String   @default("customer")
+  createdAt    DateTime @db.Timestamptz(3)
+  updatedAt    DateTime @db.Timestamptz(3)
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 }
 
 model Product {
@@ -960,8 +1078,354 @@ model ProcessedEvent {
   eventName   String
   processedAt DateTime @db.Timestamptz(3)
 }
-````
 
+````
+````ecommerce-backend/src/application/auth/access-policy.ts
+import type { Principal } from "./principal.js";
+
+export type AuthorizationError = {
+  type: "forbidden";
+  message: string;
+};
+
+/**
+ * One message for every refusal: it tells the caller that this principal may
+ * not perform this operation, and nothing about what exists or who owns it.
+ */
+export const FORBIDDEN: AuthorizationError = {
+  type: "forbidden",
+  message: "You are not allowed to access this resource",
+};
+
+/**
+ * Ownership is a business rule, so it lives here rather than in a route table:
+ * a customer may act for itself, and an administrator may act for anyone.
+ */
+export function canActForCustomer(
+  principal: Principal,
+  customerId: string,
+): boolean {
+  return principal.role === "admin" || principal.customerId === customerId;
+}
+
+export function canAccessOrder(
+  principal: Principal,
+  order: { customerId: string },
+): boolean {
+  return canActForCustomer(principal, order.customerId);
+}
+
+````
+````ecommerce-backend/src/application/auth/login/login.ts
+import { err, ok } from "../../../domain/shared/result.js";
+import type { Login, LoginDependencies, LoginError } from "./login.types.js";
+
+/**
+ * Verifies an email/password pair and issues an access token.
+ *
+ * The account is loaded by email (the address is normalised by the customer
+ * domain on registration), then the credential is verified. When either lookup
+ * misses, the hasher is still asked to verify against nothing, which spends
+ * the same work as a real comparison.
+ */
+export function loginUseCase({
+  customers,
+  accounts,
+  hasher,
+  tokens,
+}: LoginDependencies): Login {
+  return async ({ email, password }) => {
+    let customer: Awaited<ReturnType<typeof customers.findByEmail>>;
+    let account: Awaited<ReturnType<typeof accounts.findByCustomerId>>;
+
+    try {
+      customer = await customers.findByEmail(email);
+      account =
+        customer === null ? null : await accounts.findByCustomerId(customer.id);
+    } catch {
+      return err<LoginError>({
+        type: "repository_error",
+        message: "Could not load the account",
+      });
+    }
+
+    const matches = await hasher.verify(
+      password,
+      account?.passwordHash ?? null,
+    );
+
+    if (customer === null || account === null || !matches) {
+      return err<LoginError>({
+        type: "invalid_credentials",
+        message: "Email or password is incorrect",
+      });
+    }
+
+    return ok({
+      customer,
+      role: account.role,
+      accessToken: await tokens.issue({
+        customerId: customer.id,
+        email: customer.email,
+        role: account.role,
+      }),
+    });
+  };
+}
+
+````
+````ecommerce-backend/src/application/auth/login/login.types.ts
+import type { Result } from "../../../domain/shared/result.js";
+import type { PasswordHasher } from "../../ports/password-hasher.js";
+import type { AccountRepository } from "../../ports/repositories/account-repository.js";
+import type { CustomerRepository } from "../../ports/repositories/customer-repository.js";
+import type { TokenService } from "../../ports/token-service.js";
+import type { AuthenticatedSession } from "../session.js";
+
+export type LoginInput = {
+  email: string;
+  password: string;
+};
+
+/**
+ * One failure for every reason: unknown address, no credential record, and a
+ * wrong password are indistinguishable to the caller, so login cannot be used
+ * to discover which addresses are registered.
+ */
+export type LoginError =
+  | {
+      type: "invalid_credentials";
+      message: string;
+    }
+  | {
+      type: "repository_error";
+      message: string;
+    };
+
+export type LoginDependencies = {
+  customers: CustomerRepository;
+  accounts: AccountRepository;
+  hasher: PasswordHasher;
+  tokens: TokenService;
+};
+
+export type Login = (
+  input: LoginInput,
+) => Promise<Result<AuthenticatedSession, LoginError>>;
+
+````
+````ecommerce-backend/src/application/auth/principal.ts
+import type { Role } from "../../domain/auth/role.js";
+
+/**
+ * The authenticated caller, as the application layer understands it. It is
+ * derived from a verified token at the edge; use cases never parse HTTP.
+ */
+export type Principal = {
+  customerId: string;
+  email: string;
+  role: Role;
+};
+
+````
+````ecommerce-backend/src/application/auth/register/register.ts
+import {
+  createAccount,
+  validatePassword,
+} from "../../../domain/auth/account.js";
+import type { Role } from "../../../domain/auth/role.js";
+import {
+  createCustomer,
+  type Customer,
+} from "../../../domain/customer/customer.js";
+import { customerRegistered } from "../../../domain/customer/customer-events.js";
+import { err, ok } from "../../../domain/shared/result.js";
+import { stageEvent } from "../../outbox/stage-event.js";
+import type { AuthenticatedSession } from "../session.js";
+import type {
+  Register,
+  RegisterDependencies,
+  RegisterError,
+} from "./register.types.js";
+
+/**
+ * Registration is the only way a customer comes into existence: the profile,
+ * the credential, and the `customer.registered` event commit together. There is
+ * no path that creates a customer who cannot log in.
+ *
+ * The password is hashed *before* the transaction opens: key derivation is
+ * deliberately slow, and holding a serializable transaction open while the CPU
+ * works would block other writers for no reason.
+ */
+export function registerUseCase({
+  customers,
+  accounts,
+  hasher,
+  tokens,
+  ids,
+  clock,
+  outbox,
+  unitOfWork,
+  bootstrapAdminEmails,
+}: RegisterDependencies): Register {
+  return async (input) => {
+    const password = validatePassword(input.password);
+
+    if (!password.ok) {
+      return err(password.error);
+    }
+
+    const passwordHash = await hasher.hash(password.value);
+
+    const registered = await unitOfWork.execute<
+      { customer: Customer; role: Role },
+      RegisterError
+    >(async () => {
+      const now = clock.now();
+
+      const customer = createCustomer({
+        id: ids.nextId(),
+        email: input.email,
+        name: input.name,
+        createdAt: now,
+      });
+
+      if (!customer.ok) {
+        return err({
+          type: "invalid_customer",
+          message: customer.error.message,
+        });
+      }
+
+      const existing = await customers.findByEmail(customer.value.email);
+
+      if (existing !== null) {
+        return err({
+          type: "email_already_registered",
+          message: "A customer with this email already exists",
+        });
+      }
+
+      // Only an address listed by the operator can register as an
+      // administrator; every other registration is a customer. Elevating an
+      // existing account is a separate, auditable action (`npm run
+      // admin:grant`).
+      const role: Role = bootstrapAdminEmails.includes(customer.value.email)
+        ? "admin"
+        : "customer";
+
+      const account = createAccount({
+        customerId: customer.value.id,
+        passwordHash,
+        role,
+        createdAt: now,
+      });
+
+      if (!account.ok) {
+        return err(account.error);
+      }
+
+      await customers.save(customer.value);
+      await accounts.save(account.value);
+      await stageEvent(
+        { outbox, ids, clock },
+        customerRegistered(customer.value, now),
+      );
+
+      return ok({ customer: customer.value, role });
+    });
+
+    if (!registered.ok) {
+      return registered;
+    }
+
+    // Issued only after the commit: a token for a rolled-back registration
+    // would be a credential to an account that does not exist.
+    const { customer, role } = registered.value;
+
+    const session: AuthenticatedSession = {
+      customer,
+      role,
+      accessToken: await tokens.issue({
+        customerId: customer.id,
+        email: customer.email,
+        role,
+      }),
+    };
+
+    return ok(session);
+  };
+}
+
+````
+````ecommerce-backend/src/application/auth/register/register.types.ts
+import type { AuthDomainError } from "../../../domain/auth/auth-errors.js";
+import type { Result } from "../../../domain/shared/result.js";
+import type { Clock } from "../../ports/clock.js";
+import type { IdGenerator } from "../../ports/id-generator.js";
+import type { OutboxRepository } from "../../ports/outbox.js";
+import type { PasswordHasher } from "../../ports/password-hasher.js";
+import type { AccountRepository } from "../../ports/repositories/account-repository.js";
+import type { CustomerRepository } from "../../ports/repositories/customer-repository.js";
+import type { TokenService } from "../../ports/token-service.js";
+import type { UnitOfWork, UnitOfWorkError } from "../../ports/unit-of-work.js";
+import type { AuthenticatedSession } from "../session.js";
+
+export type RegisterInput = {
+  email: string;
+  name: string;
+  password: string;
+};
+
+export type RegisterError =
+  | AuthDomainError
+  | {
+      type: "invalid_customer";
+      message: string;
+    }
+  | {
+      type: "email_already_registered";
+      message: string;
+    }
+  | UnitOfWorkError;
+
+export type RegisterDependencies = {
+  customers: CustomerRepository;
+  accounts: AccountRepository;
+  hasher: PasswordHasher;
+  tokens: TokenService;
+  ids: IdGenerator;
+  clock: Clock;
+  outbox: OutboxRepository;
+  unitOfWork: UnitOfWork;
+  /**
+   * Addresses that receive `admin` on registration. This is how a fresh
+   * deployment gets its first administrator; it is configuration, not input.
+   */
+  bootstrapAdminEmails: readonly string[];
+};
+
+export type Register = (
+  input: RegisterInput,
+) => Promise<Result<AuthenticatedSession, RegisterError>>;
+
+````
+````ecommerce-backend/src/application/auth/session.ts
+import type { Role } from "../../domain/auth/role.js";
+import type { Customer } from "../../domain/customer/customer.js";
+import type { AccessToken } from "../ports/token-service.js";
+
+/**
+ * What a successful register or login returns. Keeping it in one place means a
+ * client can treat both responses identically.
+ */
+export type AuthenticatedSession = {
+  customer: Customer;
+  role: Role;
+  accessToken: AccessToken;
+};
+
+````
 ````ecommerce-backend/src/application/cart/add-item/add-item.ts
 import {
   addItem as addItemToCart,
@@ -1092,8 +1556,8 @@ export function addItemUseCase({
     return ok(updated.value);
   };
 }
-````
 
+````
 ````ecommerce-backend/src/application/cart/add-item/add-item.types.ts
 import type { Cart } from "../../../domain/cart/cart.js";
 import type { CustomerId } from "../../../domain/customer/customer-id.js";
@@ -1148,8 +1612,8 @@ export type AddItemDependencies = {
 export type AddItem = (
   input: AddItemInput,
 ) => Promise<Result<Cart, AddItemError>>;
-````
 
+````
 ````ecommerce-backend/src/application/cart/get-cart/get-cart.ts
 import {
   cartItemCount,
@@ -1186,8 +1650,8 @@ export function getCartUseCase({ carts }: GetCartDependencies): GetCart {
     });
   };
 }
-````
 
+````
 ````ecommerce-backend/src/application/cart/get-cart/get-cart.types.ts
 import type { Cart } from "../../../domain/cart/cart.js";
 import type { CustomerId } from "../../../domain/customer/customer-id.js";
@@ -1226,8 +1690,8 @@ export type GetCartDependencies = {
 export type GetCart = (
   input: GetCartInput,
 ) => Promise<Result<CartView, GetCartError>>;
-````
 
+````
 ````ecommerce-backend/src/application/cart/remove-item/remove-item.ts
 import {
   removeItem as removeItemFromCart,
@@ -1283,8 +1747,8 @@ export function removeItemUseCase({
     return ok(updated.value);
   };
 }
-````
 
+````
 ````ecommerce-backend/src/application/cart/remove-item/remove-item.types.ts
 import type { Cart } from "../../../domain/cart/cart.js";
 import type { CustomerId } from "../../../domain/customer/customer-id.js";
@@ -1320,8 +1784,8 @@ export type RemoveItemDependencies = {
 export type RemoveItem = (
   input: RemoveItemInput,
 ) => Promise<Result<Cart, RemoveItemError>>;
-````
 
+````
 ````ecommerce-backend/src/application/checkout/checkout.ts
 import { err, ok } from "../../domain/shared/result.js";
 import type {
@@ -1447,8 +1911,8 @@ export function checkoutUseCase({
     }
   };
 }
-````
 
+````
 ````ecommerce-backend/src/application/checkout/checkout.types.ts
 import type { CustomerId } from "../../domain/customer/customer-id.js";
 import type { Order } from "../../domain/order/order.js";
@@ -1510,109 +1974,8 @@ export type CheckoutDependencies = {
 export type Checkout = (
   input: CheckoutInput,
 ) => Promise<Result<CheckoutOutcome, CheckoutError>>;
+
 ````
-
-````ecommerce-backend/src/application/customer/create-customer/create-customer.ts
-import {
-  createCustomer,
-  type Customer,
-} from "../../../domain/customer/customer.js";
-import { customerRegistered } from "../../../domain/customer/customer-events.js";
-import { err, ok } from "../../../domain/shared/result.js";
-import { stageEvent } from "../../outbox/stage-event.js";
-import type {
-  CreateCustomer,
-  CreateCustomerDependencies,
-  CreateCustomerError,
-} from "./create-customer.types.js";
-
-/**
- * Registration: validate through the domain, refuse a duplicate address, then
- * persist the customer and its `customer.registered` outbox row atomically.
- * Saving the customer without the event (or the reverse) is no longer possible.
- */
-export function createCustomerUseCase({
-  customers,
-  ids,
-  clock,
-  outbox,
-  unitOfWork,
-}: CreateCustomerDependencies): CreateCustomer {
-  return async (input) =>
-    unitOfWork.execute<Customer, CreateCustomerError>(async () => {
-      const now = clock.now();
-
-      const customer = createCustomer({
-        id: ids.nextId(),
-        email: input.email,
-        name: input.name,
-        createdAt: now,
-      });
-
-      if (!customer.ok) {
-        return err({
-          type: "invalid_customer",
-          message: customer.error.message,
-        });
-      }
-
-      const existing = await customers.findByEmail(customer.value.email);
-
-      if (existing !== null) {
-        return err({
-          type: "email_already_registered",
-          message: "A customer with this email already exists",
-        });
-      }
-
-      await customers.save(customer.value);
-      await stageEvent(
-        { outbox, ids, clock },
-        customerRegistered(customer.value, now),
-      );
-
-      return ok(customer.value);
-    });
-}
-````
-
-````ecommerce-backend/src/application/customer/create-customer/create-customer.types.ts
-import type { Customer } from "../../../domain/customer/customer.js";
-import type { Result } from "../../../domain/shared/result.js";
-import type { Clock } from "../../ports/clock.js";
-import type { IdGenerator } from "../../ports/id-generator.js";
-import type { OutboxRepository } from "../../ports/outbox.js";
-import type { CustomerRepository } from "../../ports/repositories/customer-repository.js";
-import type { UnitOfWork, UnitOfWorkError } from "../../ports/unit-of-work.js";
-
-export type CreateCustomerInput = {
-  email: string;
-  name: string;
-};
-
-export type CreateCustomerError =
-  | {
-      type: "invalid_customer";
-      message: string;
-    }
-  | {
-      type: "email_already_registered";
-      message: string;
-    };
-
-export type CreateCustomerDependencies = {
-  customers: CustomerRepository;
-  ids: IdGenerator;
-  clock: Clock;
-  outbox: OutboxRepository;
-  unitOfWork: UnitOfWork;
-};
-
-export type CreateCustomer = (
-  input: CreateCustomerInput,
-) => Promise<Result<Customer, CreateCustomerError | UnitOfWorkError>>;
-````
-
 ````ecommerce-backend/src/application/customer/get-customer/get-customer.ts
 import type { Customer } from "../../../domain/customer/customer.js";
 import { err, ok } from "../../../domain/shared/result.js";
@@ -1646,8 +2009,8 @@ export function getCustomerUseCase({
     return ok(customer);
   };
 }
-````
 
+````
 ````ecommerce-backend/src/application/customer/get-customer/get-customer.types.ts
 import type { Customer } from "../../../domain/customer/customer.js";
 import type { CustomerId } from "../../../domain/customer/customer-id.js";
@@ -1675,8 +2038,8 @@ export type GetCustomerDependencies = {
 export type GetCustomer = (
   input: GetCustomerInput,
 ) => Promise<Result<Customer, GetCustomerError>>;
-````
 
+````
 ````ecommerce-backend/src/application/order/cancel-order/cancel-order.ts
 import {
   releaseStock,
@@ -1774,8 +2137,8 @@ export function cancelOrderUseCase({
       return ok(cancelled.value);
     });
 }
-````
 
+````
 ````ecommerce-backend/src/application/order/cancel-order/cancel-order.types.ts
 import type { Order, OrderId } from "../../../domain/order/order.js";
 import type { Result } from "../../../domain/shared/result.js";
@@ -1824,8 +2187,8 @@ export type CancelOrderDependencies = {
 export type CancelOrder = (
   input: CancelOrderInput,
 ) => Promise<Result<Order, CancelOrderError | UnitOfWorkError>>;
-````
 
+````
 ````ecommerce-backend/src/application/order/create-order/create-order.ts
 import { clearCart, type Cart } from "../../../domain/cart/cart.js";
 import {
@@ -1952,8 +2315,8 @@ export function createOrderUseCase({
       return ok(order.value);
     });
 }
-````
 
+````
 ````ecommerce-backend/src/application/order/create-order/create-order.types.ts
 import type { CustomerId } from "../../../domain/customer/customer-id.js";
 import type { Order } from "../../../domain/order/order.js";
@@ -2005,8 +2368,8 @@ export type CreateOrderDependencies = {
 export type CreateOrder = (
   input: CreateOrderInput,
 ) => Promise<Result<Order, CreateOrderError | UnitOfWorkError>>;
-````
 
+````
 ````ecommerce-backend/src/application/order/get-order/get-order.ts
 import type { Order } from "../../../domain/order/order.js";
 import { err, ok } from "../../../domain/shared/result.js";
@@ -2035,8 +2398,8 @@ export function getOrderUseCase({ orders }: GetOrderDependencies): GetOrder {
     return ok(order);
   };
 }
-````
 
+````
 ````ecommerce-backend/src/application/order/get-order/get-order.types.ts
 import type { Order, OrderId } from "../../../domain/order/order.js";
 import type { Result } from "../../../domain/shared/result.js";
@@ -2063,8 +2426,8 @@ export type GetOrderDependencies = {
 export type GetOrder = (
   input: GetOrderInput,
 ) => Promise<Result<Order, GetOrderError>>;
-````
 
+````
 ````ecommerce-backend/src/application/outbox/backoff.ts
 /** After this many failed deliveries the message is dead-lettered. */
 export const MAX_DELIVERY_ATTEMPTS = 5;
@@ -2086,8 +2449,8 @@ export function retryDelayMs(attempts: number): number {
 export function isDeadLettered(attempts: number): boolean {
   return attempts >= MAX_DELIVERY_ATTEMPTS;
 }
-````
 
+````
 ````ecommerce-backend/src/application/outbox/dispatch-outbox.ts
 import { err, ok } from "../../domain/shared/result.js";
 import { isDeadLettered, retryDelayMs } from "./backoff.js";
@@ -2172,8 +2535,8 @@ export function dispatchOutboxUseCase({
     return ok(summary);
   };
 }
-````
 
+````
 ````ecommerce-backend/src/application/outbox/dispatch-outbox.types.ts
 import type { Result } from "../../domain/shared/result.js";
 import type { Clock } from "../ports/clock.js";
@@ -2207,8 +2570,8 @@ export type DispatchOutboxDependencies = {
 export type DispatchOutbox = () => Promise<
   Result<OutboxDispatchSummary, OutboxDispatchError>
 >;
-````
 
+````
 ````ecommerce-backend/src/application/outbox/stage-event.ts
 import type { DomainEvent } from "../../domain/shared/domain-event.js";
 import type { Clock } from "../ports/clock.js";
@@ -2243,8 +2606,8 @@ export function stageEvent(
     deadLetteredAt: null,
   });
 }
-````
 
+````
 ````ecommerce-backend/src/application/payment/process-payment/process-payment.ts
 import {
   commitReservation,
@@ -2457,8 +2820,8 @@ export function processPaymentUseCase({
     });
   };
 }
-````
 
+````
 ````ecommerce-backend/src/application/payment/process-payment/process-payment.types.ts
 import type { Order, OrderId } from "../../../domain/order/order.js";
 import type { Payment } from "../../../domain/payment/payment.js";
@@ -2545,8 +2908,8 @@ export type ProcessPayment = (
 ) => Promise<
   Result<ProcessPaymentResult, ProcessPaymentError | UnitOfWorkError>
 >;
-````
 
+````
 ````ecommerce-backend/src/application/ports/cache.ts
 /**
  * A read-through cache. It is an optimisation, never a source of truth: a miss
@@ -2557,15 +2920,15 @@ export type Cache = {
   set<T>(key: string, value: T, ttlSeconds: number): Promise<void>;
   delete(key: string): Promise<void>;
 };
-````
 
+````
 ````ecommerce-backend/src/application/ports/clock.ts
 /** Time is a capability, so use cases are deterministic in tests. */
 export type Clock = {
   now(): string;
 };
-````
 
+````
 ````ecommerce-backend/src/application/ports/event-publisher.ts
 import type { DomainEvent } from "../../domain/shared/domain-event.js";
 
@@ -2582,15 +2945,15 @@ export type EventEnvelope = {
 export type EventPublisher = {
   publish(event: DomainEvent, envelope: EventEnvelope): Promise<void>;
 };
-````
 
+````
 ````ecommerce-backend/src/application/ports/id-generator.ts
 /** Identity creation is a capability, so use cases never call `randomUUID`. */
 export type IdGenerator = {
   nextId(): string;
 };
-````
 
+````
 ````ecommerce-backend/src/application/ports/idempotency-store.ts
 /**
  * The recorded outcome of an operation that already happened, keyed by the
@@ -2627,8 +2990,8 @@ export type IdempotencyStore = {
   /** Frees a claim that did not produce a stored outcome (a decline, a crash). */
   release(key: string): Promise<void>;
 };
-````
 
+````
 ````ecommerce-backend/src/application/ports/inbox-store.ts
 /**
  * The consumer side of at-least-once delivery: record the event id in the same
@@ -2646,8 +3009,8 @@ export type InboxStore = {
   }): Promise<boolean>;
   hasProcessed(id: string): Promise<boolean>;
 };
-````
 
+````
 ````ecommerce-backend/src/application/ports/outbox.ts
 import type { DomainEvent } from "../../domain/shared/domain-event.js";
 
@@ -2693,8 +3056,26 @@ export type OutboxRepository = {
   /** Dead-lettered messages, for operators and tests. */
   findDeadLettered(limit: number): Promise<OutboxMessage[]>;
 };
-````
 
+````
+````ecommerce-backend/src/application/ports/password-hasher.ts
+/**
+ * Password hashing is deliberately a port: the algorithm, its cost, and the
+ * encoding are infrastructure decisions, while the application only needs
+ * "store this safely" and "does this match".
+ */
+export type PasswordHasher = {
+  /** Returns a self-describing hash (algorithm and parameters included). */
+  hash(password: string): Promise<string>;
+  /**
+   * A missing credential (`null`) still costs one verification in the
+   * adapter, so an unknown account and a wrong password take the same time and
+   * cannot be distinguished by an attacker.
+   */
+  verify(password: string, storedHash: string | null): Promise<boolean>;
+};
+
+````
 ````ecommerce-backend/src/application/ports/payment-gateway.ts
 import type { Money } from "../../domain/product/money.js";
 import type { Result } from "../../domain/shared/result.js";
@@ -2733,8 +3114,8 @@ export type ChargeResult = Result<
 export type PaymentGateway = {
   charge(request: PaymentGatewayRequest): Promise<ChargeResult>;
 };
-````
 
+````
 ````ecommerce-backend/src/application/ports/rate-limiter.ts
 /**
  * A fixed-window counter: "this caller may do N things per window".
@@ -2753,8 +3134,18 @@ export type RateLimitDecision = {
 export type RateLimiter = {
   consume(key: string): Promise<RateLimitDecision>;
 };
-````
 
+````
+````ecommerce-backend/src/application/ports/repositories/account-repository.ts
+import type { Account } from "../../../domain/auth/account.js";
+
+/** Credentials are keyed by the customer they belong to, one account each. */
+export type AccountRepository = {
+  save(account: Account): Promise<void>;
+  findByCustomerId(customerId: string): Promise<Account | null>;
+};
+
+````
 ````ecommerce-backend/src/application/ports/repositories/cart-repository.ts
 import type { Cart, CartId } from "../../../domain/cart/cart.js";
 import type { CustomerId } from "../../../domain/customer/customer-id.js";
@@ -2765,8 +3156,8 @@ export type CartRepository = {
   findById(id: CartId): Promise<Cart | null>;
   findByCustomerId(customerId: CustomerId): Promise<Cart | null>;
 };
-````
 
+````
 ````ecommerce-backend/src/application/ports/repositories/customer-repository.ts
 import type { Customer } from "../../../domain/customer/customer.js";
 import type { CustomerId } from "../../../domain/customer/customer-id.js";
@@ -2777,8 +3168,8 @@ export type CustomerRepository = {
   findById(id: CustomerId): Promise<Customer | null>;
   findByEmail(email: string): Promise<Customer | null>;
 };
-````
 
+````
 ````ecommerce-backend/src/application/ports/repositories/inventory-repository.ts
 import type { InventoryItem } from "../../../domain/inventory/inventory-item.js";
 import type { ProductId } from "../../../domain/product/product-id.js";
@@ -2788,8 +3179,8 @@ export type InventoryRepository = {
   save(item: InventoryItem): Promise<void>;
   findByProductId(productId: ProductId): Promise<InventoryItem | null>;
 };
-````
 
+````
 ````ecommerce-backend/src/application/ports/repositories/order-repository.ts
 import type { CustomerId } from "../../../domain/customer/customer-id.js";
 import type { Order, OrderId } from "../../../domain/order/order.js";
@@ -2799,8 +3190,8 @@ export type OrderRepository = {
   findById(id: OrderId): Promise<Order | null>;
   findByCustomerId(customerId: CustomerId): Promise<Order[]>;
 };
-````
 
+````
 ````ecommerce-backend/src/application/ports/repositories/product-repository.ts
 import type { Product } from "../../../domain/product/product.js";
 import type { ProductId } from "../../../domain/product/product-id.js";
@@ -2810,8 +3201,24 @@ export type ProductRepository = {
   findById(id: ProductId): Promise<Product | null>;
   findAll(): Promise<Product[]>;
 };
-````
 
+````
+````ecommerce-backend/src/application/ports/token-service.ts
+import type { Principal } from "../auth/principal.js";
+
+export type AccessToken = {
+  token: string;
+  /** ISO-8601 instant, so clients can refresh before expiry. */
+  expiresAt: string;
+};
+
+export type TokenService = {
+  issue(principal: Principal): Promise<AccessToken>;
+  /** Returns `null` for a malformed, expired, or wrongly signed token. */
+  verify(token: string): Promise<Principal | null>;
+};
+
+````
 ````ecommerce-backend/src/application/ports/unit-of-work.ts
 import type { Result } from "../../domain/shared/result.js";
 
@@ -2839,8 +3246,8 @@ export type UnitOfWork = {
     work: () => Promise<Result<T, E>>,
   ): Promise<Result<T, E | UnitOfWorkError>>;
 };
-````
 
+````
 ````ecommerce-backend/src/application/product/create-product/create-product.ts
 import { createInventoryItem } from "../../../domain/inventory/inventory-item.js";
 import { createMoney } from "../../../domain/product/money.js";
@@ -2914,8 +3321,8 @@ export function createProductUseCase({
       return ok(product.value);
     });
 }
-````
 
+````
 ````ecommerce-backend/src/application/product/create-product/create-product.types.ts
 import type { Product } from "../../../domain/product/product.js";
 import type { Result } from "../../../domain/shared/result.js";
@@ -2954,8 +3361,8 @@ export type CreateProductDependencies = {
 export type CreateProduct = (
   input: CreateProductInput,
 ) => Promise<Result<Product, CreateProductError | UnitOfWorkError>>;
-````
 
+````
 ````ecommerce-backend/src/application/product/get-product/get-product.ts
 import type { Product } from "../../../domain/product/product.js";
 import { err, ok } from "../../../domain/shared/result.js";
@@ -3015,8 +3422,8 @@ export function getProductUseCase({
     return ok(product);
   };
 }
-````
 
+````
 ````ecommerce-backend/src/application/product/get-product/get-product.types.ts
 import type { Product } from "../../../domain/product/product.js";
 import type { ProductId } from "../../../domain/product/product-id.js";
@@ -3046,8 +3453,8 @@ export type GetProductDependencies = {
 export type GetProduct = (
   input: GetProductInput,
 ) => Promise<Result<Product, GetProductError>>;
-````
 
+````
 ````ecommerce-backend/src/application/product/list-products/list-products.ts
 import { err, ok } from "../../../domain/shared/result.js";
 import type {
@@ -3069,8 +3476,8 @@ export function listProductsUseCase({
     }
   };
 }
-````
 
+````
 ````ecommerce-backend/src/application/product/list-products/list-products.types.ts
 import type { Product } from "../../../domain/product/product.js";
 import type { Result } from "../../../domain/shared/result.js";
@@ -3086,8 +3493,128 @@ export type ListProductsDependencies = {
 };
 
 export type ListProducts = () => Promise<Result<Product[], ListProductsError>>;
-````
 
+````
+````ecommerce-backend/src/domain/auth/account.ts
+import { err, ok, type Result } from "../shared/result.js";
+import type { AuthDomainError } from "./auth-errors.js";
+import { isRole, type Role } from "./role.js";
+
+/**
+ * Length is the property that actually resists guessing, so the policy is a
+ * length floor (OWASP's 12-character minimum) and a ceiling that keeps a
+ * request from forcing an unbounded key derivation. Composition rules are
+ * deliberately absent: they push people toward predictable substitutions.
+ */
+export const MIN_PASSWORD_LENGTH = 12;
+export const MAX_PASSWORD_LENGTH = 128;
+
+export type Account = {
+  customerId: string;
+  /** Produced and read by the hashing adapter; never a plaintext password. */
+  passwordHash: string;
+  role: Role;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export function validatePassword(
+  password: string,
+): Result<string, AuthDomainError> {
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    return err({
+      type: "invalid_password",
+      message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters`,
+    });
+  }
+
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    return err({
+      type: "invalid_password",
+      message: `Password cannot exceed ${MAX_PASSWORD_LENGTH} characters`,
+    });
+  }
+
+  return ok(password);
+}
+
+/**
+ * The credential record for a customer. The hash is supplied by the caller,
+ * because hashing is an infrastructure concern; the domain only decides
+ * whether the result is structurally valid and which roles may exist.
+ */
+export function createAccount(input: {
+  customerId: string;
+  passwordHash: string;
+  role: Role;
+  createdAt: string;
+}): Result<Account, AuthDomainError> {
+  if (input.passwordHash.trim().length === 0) {
+    return err({
+      type: "invalid_password",
+      message: "A password hash is required",
+    });
+  }
+
+  if (!isRole(input.role)) {
+    return err({
+      type: "invalid_role",
+      message: `Unknown role: ${String(input.role)}`,
+    });
+  }
+
+  return ok({
+    customerId: input.customerId,
+    passwordHash: input.passwordHash,
+    role: input.role,
+    createdAt: input.createdAt,
+    updatedAt: input.createdAt,
+  });
+}
+
+/** Changes the role without touching the stored credential. */
+export function assignRole(
+  account: Account,
+  role: Role,
+  updatedAt: string,
+): Result<Account, AuthDomainError> {
+  if (!isRole(role)) {
+    return err({
+      type: "invalid_role",
+      message: `Unknown role: ${String(role)}`,
+    });
+  }
+
+  return ok({ ...account, role, updatedAt });
+}
+
+````
+````ecommerce-backend/src/domain/auth/auth-errors.ts
+export type AuthDomainError =
+  | {
+      type: "invalid_password";
+      message: string;
+    }
+  | {
+      type: "invalid_role";
+      message: string;
+    };
+
+````
+````ecommerce-backend/src/domain/auth/role.ts
+/**
+ * The closed set of roles. Authorization is written against these values, so a
+ * typo in a token or a row becomes a rejected role rather than a silent grant.
+ */
+export const ROLES = ["customer", "admin"] as const;
+
+export type Role = (typeof ROLES)[number];
+
+export function isRole(value: string): value is Role {
+  return (ROLES as readonly string[]).includes(value);
+}
+
+````
 ````ecommerce-backend/src/domain/cart/cart-errors.ts
 export type CartDomainError =
   | {
@@ -3102,8 +3629,8 @@ export type CartDomainError =
       type: "cart_currency_mismatch";
       message: string;
     };
-````
 
+````
 ````ecommerce-backend/src/domain/cart/cart-item.ts
 import type { Money } from "../product/money.js";
 import type { ProductId } from "../product/product-id.js";
@@ -3151,8 +3678,8 @@ export function cartItemTotal(item: CartItem): Money {
     currency: item.unitPrice.currency,
   };
 }
-````
 
+````
 ````ecommerce-backend/src/domain/cart/cart.ts
 import type { CustomerId } from "../customer/customer-id.js";
 import type { Money } from "../product/money.js";
@@ -3310,8 +3837,8 @@ export function cartTotal(cart: Cart): Money | null {
 export function cartItemCount(cart: Cart): number {
   return cart.items.reduce((count, item) => count + item.quantity, 0);
 }
-````
 
+````
 ````ecommerce-backend/src/domain/customer/customer-errors.ts
 export type CustomerDomainError =
   | {
@@ -3322,8 +3849,8 @@ export type CustomerDomainError =
       type: "invalid_customer_name";
       message: string;
     };
-````
 
+````
 ````ecommerce-backend/src/domain/customer/customer-events.ts
 import type { DomainEvent } from "../shared/domain-event.js";
 import type { Customer } from "./customer.js";
@@ -3344,13 +3871,13 @@ export function customerRegistered(
     payload: { customerId: customer.id, email: customer.email },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/domain/customer/customer-id.ts
 /** Identity of a customer. Ids are generated outside the domain. */
 export type CustomerId = string;
-````
 
+````
 ````ecommerce-backend/src/domain/customer/customer.ts
 import { err, ok, type Result } from "../shared/result.js";
 import type { CustomerDomainError } from "./customer-errors.js";
@@ -3436,8 +3963,8 @@ export function renameCustomer(
 
   return ok({ ...customer, name: trimmed });
 }
-````
 
+````
 ````ecommerce-backend/src/domain/inventory/inventory-errors.ts
 export type InventoryDomainError =
   | {
@@ -3448,13 +3975,13 @@ export type InventoryDomainError =
       type: "insufficient_stock";
       message: string;
     };
-````
 
+````
 ````ecommerce-backend/src/domain/inventory/inventory-id.ts
 /** Identity of an inventory record. One record exists per product. */
 export type InventoryId = string;
-````
 
+````
 ````ecommerce-backend/src/domain/inventory/inventory-item.ts
 import type { ProductId } from "../product/product-id.js";
 import { err, ok, type Result } from "../shared/result.js";
@@ -3628,8 +4155,8 @@ export function restock(
     updatedAt: restockedAt,
   });
 }
-````
 
+````
 ````ecommerce-backend/src/domain/order/order-errors.ts
 /** Failures that can happen while assembling an order. */
 export type OrderDomainError =
@@ -3655,8 +4182,8 @@ export type OrderTransitionError =
       type: "order_cancelled";
       message: string;
     };
-````
 
+````
 ````ecommerce-backend/src/domain/order/order-events.ts
 import type { DomainEvent } from "../shared/domain-event.js";
 import type { Order } from "./order.js";
@@ -3720,8 +4247,8 @@ export function orderCancelled(
     payload: { orderId: order.id, customerId: order.customerId },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/domain/order/order-item.ts
 import type { CartItem } from "../cart/cart-item.js";
 import { multiplyMoney, type Money } from "../product/money.js";
@@ -3769,8 +4296,8 @@ export function orderItemFromCartItem(
     unitPrice: item.unitPrice,
   });
 }
-````
 
+````
 ````ecommerce-backend/src/domain/order/order-status.ts
 /**
  * The order lifecycle. There is no `shipped`/`delivered` yet: adding those is
@@ -3781,8 +4308,8 @@ export type OrderStatus = "pending_payment" | "paid" | "cancelled";
 export function isPendingPayment(status: OrderStatus): boolean {
   return status === "pending_payment";
 }
-````
 
+````
 ````ecommerce-backend/src/domain/order/order.ts
 import type { CustomerId } from "../customer/customer-id.js";
 import { addMoney, type Money } from "../product/money.js";
@@ -3916,8 +4443,8 @@ export function cancelOrder(
     updatedAt: cancelledAt,
   });
 }
-````
 
+````
 ````ecommerce-backend/src/domain/payment/payment-errors.ts
 export type PaymentDomainError =
   | {
@@ -3928,8 +4455,8 @@ export type PaymentDomainError =
       type: "payment_already_resolved";
       message: string;
     };
-````
 
+````
 ````ecommerce-backend/src/domain/payment/payment-status.ts
 /** A payment is only ever pending once; it then resolves exactly once. */
 export type PaymentStatus = "pending" | "succeeded" | "failed";
@@ -3937,8 +4464,8 @@ export type PaymentStatus = "pending" | "succeeded" | "failed";
 export function isPending(status: PaymentStatus): boolean {
   return status === "pending";
 }
-````
 
+````
 ````ecommerce-backend/src/domain/payment/payment.ts
 import type { OrderId } from "../order/order.js";
 import type { Money } from "../product/money.js";
@@ -4023,8 +4550,8 @@ export function failPayment(
     updatedAt: failedAt,
   });
 }
-````
 
+````
 ````ecommerce-backend/src/domain/product/money.ts
 import { err, ok, type Result } from "../shared/result.js";
 import type { ProductDomainError } from "./product-errors.js";
@@ -4095,8 +4622,8 @@ export function multiplyMoney(money: Money, quantity: number): Money {
 export function formatMoney(money: Money): string {
   return `${(money.amountInMinorUnits / 100).toFixed(2)} ${money.currency}`;
 }
-````
 
+````
 ````ecommerce-backend/src/domain/product/product-errors.ts
 export type ProductDomainError =
   | {
@@ -4115,13 +4642,13 @@ export type ProductDomainError =
       type: "currency_mismatch";
       message: string;
     };
-````
 
+````
 ````ecommerce-backend/src/domain/product/product-id.ts
 /** Identity of a product. Ids are generated outside the domain. */
 export type ProductId = string;
-````
 
+````
 ````ecommerce-backend/src/domain/product/product.ts
 import { err, ok, type Result } from "../shared/result.js";
 import type { Money } from "./money.js";
@@ -4178,8 +4705,8 @@ export function createProduct(input: {
     createdAt: input.createdAt,
   });
 }
-````
 
+````
 ````ecommerce-backend/src/domain/shared/domain-error.ts
 /**
  * Shape of an expected domain failure. Each module narrows it with a
@@ -4190,8 +4717,8 @@ export type DomainError<TType extends string = string> = {
   type: TType;
   message: string;
 };
-````
 
+````
 ````ecommerce-backend/src/domain/shared/domain-event.ts
 /**
  * Something that already happened in the business and that the outside world
@@ -4205,8 +4732,8 @@ export type DomainEvent<
   occurredAt: string;
   payload: TPayload;
 };
-````
 
+````
 ````ecommerce-backend/src/domain/shared/result.ts
 export type Result<T, E> =
   | {
@@ -4227,8 +4754,271 @@ export const err = <E>(error: E): Result<never, E> => ({
   ok: false,
   error,
 });
-````
 
+````
+````ecommerce-backend/src/infrastructure/auth/jwt-token-service.ts
+import { SignJWT, jwtVerify } from "jose";
+import type { Principal } from "../../application/auth/principal.js";
+import type {
+  AccessToken,
+  TokenService,
+} from "../../application/ports/token-service.js";
+import { isRole } from "../../domain/auth/role.js";
+
+export type JwtTokenServiceOptions = {
+  /** Shared secret; at least 32 characters. In production, a managed secret. */
+  secret: string;
+  issuer: string;
+  audience: string;
+  ttlSeconds: number;
+};
+
+/**
+ * HS256 access tokens.
+ *
+ * Only the claims the application needs are carried: the customer id (`sub`),
+ * the email, and the role. Issuer and audience are verified on the way in, so
+ * a token minted for another service with the same secret is not accepted.
+ */
+export function createJwtTokenService({
+  secret,
+  issuer,
+  audience,
+  ttlSeconds,
+}: JwtTokenServiceOptions): TokenService {
+  const key = new TextEncoder().encode(secret);
+
+  return {
+    async issue(principal: Principal): Promise<AccessToken> {
+      const issuedAt = Math.floor(Date.now() / 1000);
+      const expiresAt = issuedAt + ttlSeconds;
+
+      const token = await new SignJWT({
+        email: principal.email,
+        role: principal.role,
+      })
+        .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+        .setSubject(principal.customerId)
+        .setIssuer(issuer)
+        .setAudience(audience)
+        .setIssuedAt(issuedAt)
+        .setExpirationTime(expiresAt)
+        .sign(key);
+
+      return {
+        token,
+        expiresAt: new Date(expiresAt * 1000).toISOString(),
+      };
+    },
+
+    async verify(token: string): Promise<Principal | null> {
+      try {
+        const { payload } = await jwtVerify(token, key, {
+          issuer,
+          audience,
+          algorithms: ["HS256"],
+          clockTolerance: 5,
+        });
+
+        const email = payload["email"];
+        const role = payload["role"];
+
+        if (
+          typeof payload.sub !== "string" ||
+          payload.sub.length === 0 ||
+          typeof email !== "string" ||
+          typeof role !== "string" ||
+          !isRole(role)
+        ) {
+          return null;
+        }
+
+        return { customerId: payload.sub, email, role };
+      } catch {
+        // Expired, malformed, wrong signature, wrong issuer/audience: all the
+        // same answer to the caller.
+        return null;
+      }
+    },
+  };
+}
+
+````
+````ecommerce-backend/src/infrastructure/auth/scrypt-password-hasher.ts
+import type { PasswordHasher } from "../../application/ports/password-hasher.js";
+import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+
+export type ScryptCost = {
+  /** CPU/memory cost; must be a power of two. */
+  n?: number;
+  r?: number;
+  p?: number;
+};
+
+export type ScryptPasswordHasherOptions = {
+  /**
+   * Lowered in tests only. The defaults follow OWASP's scrypt guidance
+   * (N=2^15, r=8, p=1) and cost roughly 32 MiB and ~100 ms per verification,
+   * which is the point: guessing must be expensive.
+   */
+  cost?: ScryptCost;
+};
+
+const DEFAULT_COST = { n: 32_768, r: 8, p: 1 } as const;
+const KEY_LENGTH = 64;
+const SALT_BYTES = 16;
+const ALGORITHM = "scrypt";
+
+type ResolvedCost = { n: number; r: number; p: number };
+
+type ParsedHash = {
+  cost: ResolvedCost;
+  salt: Buffer;
+  key: Buffer;
+};
+
+function resolveCost(cost: ScryptCost | undefined): ResolvedCost {
+  return {
+    n: cost?.n ?? DEFAULT_COST.n,
+    r: cost?.r ?? DEFAULT_COST.r,
+    p: cost?.p ?? DEFAULT_COST.p,
+  };
+}
+
+function derive(
+  password: string,
+  salt: Buffer,
+  keyLength: number,
+  cost: ResolvedCost,
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    scrypt(
+      password,
+      salt,
+      keyLength,
+      {
+        N: cost.n,
+        r: cost.r,
+        p: cost.p,
+        // Node requires maxmem above 128 * N * r; headroom avoids a resize
+        // failure at the edge of the limit.
+        maxmem: 256 * cost.n * cost.r,
+      },
+      (error, key) => {
+        if (error) {
+          reject(error);
+        } else {
+          resolve(key);
+        }
+      },
+    );
+  });
+}
+
+function format(cost: ResolvedCost, salt: Buffer, key: Buffer): string {
+  return [
+    ALGORITHM,
+    cost.n,
+    cost.r,
+    cost.p,
+    salt.toString("base64url"),
+    key.toString("base64url"),
+  ].join("$");
+}
+
+/**
+ * Parses only hashes this adapter could have produced, with bounded
+ * parameters: a corrupted or hostile row cannot make verification allocate
+ * unbounded memory.
+ */
+function parse(stored: string): ParsedHash | null {
+  const parts = stored.split("$");
+
+  if (parts.length !== 6 || parts[0] !== ALGORITHM) {
+    return null;
+  }
+
+  const n = Number(parts[1]);
+  const r = Number(parts[2]);
+  const p = Number(parts[3]);
+
+  const powerOfTwo = Number.isInteger(n) && n >= 1_024 && n <= 1_048_576;
+  const bounded = Number.isInteger(r) && r >= 1 && r <= 32;
+  const parallel = Number.isInteger(p) && p >= 1 && p <= 16;
+
+  if (!powerOfTwo || !bounded || !parallel) {
+    return null;
+  }
+
+  const salt = Buffer.from(parts[4] ?? "", "base64url");
+  const key = Buffer.from(parts[5] ?? "", "base64url");
+
+  if (salt.length < 8 || key.length < 32 || key.length > 128) {
+    return null;
+  }
+
+  return { cost: { n, r, p }, salt, key };
+}
+
+/**
+ * scrypt from the Node standard library: no native build step, memory-hard,
+ * and parameterised so the work factor can rise without changing the format.
+ * The stored value carries its own parameters, so old hashes stay verifiable.
+ */
+export function createScryptPasswordHasher(
+  options: ScryptPasswordHasherOptions = {},
+): PasswordHasher {
+  const cost = resolveCost(options.cost);
+
+  // A fixed salt for the "no such account" path; the derived key is computed
+  // lazily, once per process, and never compared successfully.
+  const dummySalt = randomBytes(SALT_BYTES);
+  let dummyKey: Promise<Buffer> | null = null;
+
+  const dummy = (): Promise<Buffer> => {
+    dummyKey ??= derive(
+      "no-such-account-placeholder",
+      dummySalt,
+      KEY_LENGTH,
+      cost,
+    );
+
+    return dummyKey;
+  };
+
+  return {
+    async hash(password) {
+      const salt = randomBytes(SALT_BYTES);
+      const key = await derive(password, salt, KEY_LENGTH, cost);
+
+      return format(cost, salt, key);
+    },
+
+    async verify(password, storedHash) {
+      const parsed = storedHash === null ? null : parse(storedHash);
+
+      if (storedHash !== null && parsed === null) {
+        return false;
+      }
+
+      const expected = parsed?.key ?? (await dummy());
+      const actual = await derive(
+        password,
+        parsed?.salt ?? dummySalt,
+        expected.length,
+        parsed?.cost ?? cost,
+      );
+
+      return (
+        parsed !== null &&
+        actual.length === expected.length &&
+        timingSafeEqual(actual, expected)
+      );
+    },
+  };
+}
+
+````
 ````ecommerce-backend/src/infrastructure/cache/in-memory-cache.ts
 import type { Cache } from "../../application/ports/cache.js";
 
@@ -4272,8 +5062,8 @@ export function createInMemoryCache(now: () => number = Date.now): Cache {
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/config/config.ts
 import {
   loadEnvironment,
@@ -4289,12 +5079,28 @@ export type { Config, ConfigError };
 export function loadConfig(): Result<Config, ConfigError> {
   return parseEnvironment(loadEnvironment());
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/config/environment.ts
 import { existsSync } from "node:fs";
 import { z } from "zod";
 import { err, ok, type Result } from "../../domain/shared/result.js";
+
+export type AuthConfig = {
+  jwtSecret: string;
+  jwtIssuer: string;
+  jwtAudience: string;
+  accessTokenTtlSeconds: number;
+  /** True when the development fallback is in use; never true in production. */
+  usingDevelopmentSecret: boolean;
+  /** Brute-force budget for register/login, per caller and route. */
+  rateLimit: {
+    max: number;
+    windowSeconds: number;
+  };
+  /** Addresses that receive `admin` on registration; empty after bootstrap. */
+  bootstrapAdminEmails: string[];
+};
 
 export type Config = {
   port: number;
@@ -4311,6 +5117,7 @@ export type Config = {
     max: number;
     windowSeconds: number;
   };
+  auth: AuthConfig;
   outboxPollIntervalMs: number;
 };
 
@@ -4324,22 +5131,68 @@ const optionalString = z.preprocess(
   z.string().min(1).optional(),
 );
 
-const envSchema = z.object({
-  PORT: z.coerce.number().int().min(1).max(65535).default(3000),
-  NODE_ENV: z
-    .enum(["development", "test", "production"])
-    .default("development"),
-  // An empty value (docker compose passes one for an unset variable) means
-  // "use the fallback adapter", not "connect to an empty URI".
-  DATABASE_URL: optionalString,
-  REDIS_URL: optionalString,
-  KAFKA_BROKERS: optionalString,
-  KAFKA_CLIENT_ID: z.string().min(1).default("ecommerce-backend"),
-  KAFKA_CONSUMER_GROUP: z.string().min(1).default("ecommerce-order-events"),
-  RATE_LIMIT_MAX: z.coerce.number().int().positive().default(120),
-  RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
-  OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(100).default(1_000),
-});
+/**
+ * A development-only fallback, long enough for HS256 and obviously not a
+ * production secret. Production refuses to start without a real one.
+ */
+const DEVELOPMENT_JWT_SECRET =
+  "development-only-secret-change-before-deploying";
+
+const MIN_JWT_SECRET_LENGTH = 32;
+
+const envSchema = z
+  .object({
+    PORT: z.coerce.number().int().min(1).max(65535).default(3000),
+    NODE_ENV: z
+      .enum(["development", "test", "production"])
+      .default("development"),
+    // An empty value (docker compose passes one for an unset variable) means
+    // "use the fallback adapter", not "connect to an empty URI".
+    DATABASE_URL: optionalString,
+    REDIS_URL: optionalString,
+    KAFKA_BROKERS: optionalString,
+    KAFKA_CLIENT_ID: z.string().min(1).default("ecommerce-backend"),
+    KAFKA_CONSUMER_GROUP: z.string().min(1).default("ecommerce-order-events"),
+    RATE_LIMIT_MAX: z.coerce.number().int().positive().default(120),
+    RATE_LIMIT_WINDOW_SECONDS: z.coerce.number().int().positive().default(60),
+    JWT_SECRET: optionalString,
+    JWT_ISSUER: z.string().min(1).default("ecommerce-backend"),
+    JWT_AUDIENCE: z.string().min(1).default("ecommerce-api"),
+    ACCESS_TOKEN_TTL_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(60)
+      .max(86_400)
+      .default(900),
+    AUTH_RATE_LIMIT_MAX: z.coerce.number().int().positive().default(10),
+    AUTH_RATE_LIMIT_WINDOW_SECONDS: z.coerce
+      .number()
+      .int()
+      .positive()
+      .default(60),
+    BOOTSTRAP_ADMIN_EMAILS: optionalString,
+    OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().min(100).default(1_000),
+  })
+  .superRefine((data, context) => {
+    if (
+      data.JWT_SECRET !== undefined &&
+      data.JWT_SECRET.length < MIN_JWT_SECRET_LENGTH
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["JWT_SECRET"],
+        message: `must be at least ${MIN_JWT_SECRET_LENGTH} characters`,
+      });
+    }
+
+    if (data.NODE_ENV === "production" && data.JWT_SECRET === undefined) {
+      context.addIssue({
+        code: "custom",
+        path: ["JWT_SECRET"],
+        message: "is required in production",
+      });
+    }
+  });
 
 /** Loads a local `.env` when present, then hands back `process.env`. */
 export function loadEnvironment(): NodeJS.ProcessEnv {
@@ -4348,6 +5201,17 @@ export function loadEnvironment(): NodeJS.ProcessEnv {
   }
 
   return process.env;
+}
+
+function parseList(value: string | undefined): string[] {
+  if (value === undefined) {
+    return [];
+  }
+
+  return value
+    .split(",")
+    .map((entry) => entry.trim().toLowerCase())
+    .filter((entry) => entry.length > 0);
 }
 
 function parseBrokers(value: string | undefined): string[] | null {
@@ -4397,11 +5261,23 @@ export function parseEnvironment(
       max: parsed.data.RATE_LIMIT_MAX,
       windowSeconds: parsed.data.RATE_LIMIT_WINDOW_SECONDS,
     },
+    auth: {
+      jwtSecret: parsed.data.JWT_SECRET ?? DEVELOPMENT_JWT_SECRET,
+      jwtIssuer: parsed.data.JWT_ISSUER,
+      jwtAudience: parsed.data.JWT_AUDIENCE,
+      accessTokenTtlSeconds: parsed.data.ACCESS_TOKEN_TTL_SECONDS,
+      usingDevelopmentSecret: parsed.data.JWT_SECRET === undefined,
+      rateLimit: {
+        max: parsed.data.AUTH_RATE_LIMIT_MAX,
+        windowSeconds: parsed.data.AUTH_RATE_LIMIT_WINDOW_SECONDS,
+      },
+      bootstrapAdminEmails: parseList(parsed.data.BOOTSTRAP_ADMIN_EMAILS),
+    },
     outboxPollIntervalMs: parsed.data.OUTBOX_POLL_INTERVAL_MS,
   });
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/events/console-event-publisher.ts
 import type { EventPublisher } from "../../application/ports/event-publisher.js";
 import type { DomainEvent } from "../../domain/shared/domain-event.js";
@@ -4421,8 +5297,8 @@ export function createConsoleEventPublisher(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/health/health-check.ts
 /**
  * A dependency the process needs in order to serve traffic. Liveness answers
@@ -4463,13 +5339,217 @@ export async function runHealthChecks(
     checks: report,
   };
 }
-````
 
+````
+````ecommerce-backend/src/infrastructure/http/auth-guards.ts
+import type {
+  FastifyInstance,
+  FastifyReply,
+  FastifyRequest,
+  preHandlerHookHandler,
+} from "fastify";
+import type { Principal } from "../../application/auth/principal.js";
+import type { TokenService } from "../../application/ports/token-service.js";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    /** Set by the `onRequest` hook; `null` when no valid bearer token was sent. */
+    principal: Principal | null;
+  }
+}
+
+function unauthorized(reply: FastifyReply): void {
+  void reply
+    .header("www-authenticate", 'Bearer realm="api"')
+    .code(401)
+    .send({ message: "Authentication required" });
+}
+
+function readBearerToken(request: FastifyRequest): string | null {
+  const header = request.headers.authorization;
+
+  if (typeof header !== "string") {
+    return null;
+  }
+
+  const separator = header.indexOf(" ");
+
+  if (separator === -1) {
+    return null;
+  }
+
+  if (header.slice(0, separator).toLowerCase() !== "bearer") {
+    return null;
+  }
+
+  const token = header.slice(separator + 1).trim();
+  return token.length === 0 ? null : token;
+}
+
+/**
+ * Extracts the caller once, for every route. A missing or invalid token is not
+ * an error here: public routes must still work, and the protected ones decide
+ * what to do with `principal === null`.
+ */
+export function registerAuthentication(
+  app: FastifyInstance,
+  tokens: TokenService,
+): void {
+  app.decorateRequest("principal", null);
+
+  app.addHook("onRequest", async (request) => {
+    const token = readBearerToken(request);
+
+    if (token === null) {
+      return;
+    }
+
+    try {
+      request.principal = await tokens.verify(token);
+    } catch {
+      // A verifier failure is an unauthenticated request, not a server fault.
+      request.principal = null;
+    }
+  });
+}
+
+/** Route guard: a verified principal must exist. */
+export const requireAuth: preHandlerHookHandler = async (request, reply) => {
+  if (request.principal === null) {
+    unauthorized(reply);
+  }
+};
+
+/** Route guard: only administrators may continue. */
+export const requireAdmin: preHandlerHookHandler = async (request, reply) => {
+  if (request.principal === null) {
+    unauthorized(reply);
+    return;
+  }
+
+  if (request.principal.role !== "admin") {
+    void reply
+      .code(403)
+      .send({ message: "You are not allowed to access this resource" });
+  }
+};
+
+/**
+ * Handlers run only after `requireAuth`, but the type system does not know
+ * that, and a silent `null` would turn a wiring mistake into a crash. This
+ * makes the assumption explicit and answers 401 if it is ever wrong.
+ */
+export function principalOf(request: FastifyRequest): Principal {
+  const principal = request.principal;
+
+  if (principal === null) {
+    const error = new Error("Authentication required") as Error & {
+      statusCode: number;
+    };
+    error.statusCode = 401;
+    throw error;
+  }
+
+  return principal;
+}
+
+````
+````ecommerce-backend/src/infrastructure/http/controllers/auth-controller.ts
+import type { FastifyReply, FastifyRequest } from "fastify";
+import type { Login } from "../../../application/auth/login/login.types.js";
+import type { Register } from "../../../application/auth/register/register.types.js";
+import type { GetCustomer } from "../../../application/customer/get-customer/get-customer.types.js";
+import { principalOf } from "../auth-guards.js";
+import { sendApplicationError } from "../http-errors.js";
+import { toAuthResponse } from "../presenters/auth-presenter.js";
+import { toCustomerResponse } from "../presenters/customer-presenter.js";
+import {
+  loginBodySchema,
+  registerBodySchema,
+} from "../schemas/auth-schemas.js";
+
+type AuthControllerDependencies = {
+  register: Register;
+  login: Login;
+  getCustomer: GetCustomer;
+};
+
+export function createAuthController({
+  register,
+  login,
+  getCustomer,
+}: AuthControllerDependencies) {
+  return {
+    async register(
+      request: FastifyRequest,
+      reply: FastifyReply,
+    ): Promise<void> {
+      const body = registerBodySchema.safeParse(request.body);
+
+      if (!body.success) {
+        reply.code(400).send({ message: "Invalid request body" });
+        return;
+      }
+
+      const result = await register(body.data);
+
+      if (!result.ok) {
+        sendApplicationError(reply, result.error);
+        return;
+      }
+
+      reply.code(201).send(toAuthResponse(result.value));
+    },
+
+    async login(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+      const body = loginBodySchema.safeParse(request.body);
+
+      if (!body.success) {
+        reply.code(400).send({ message: "Invalid request body" });
+        return;
+      }
+
+      const result = await login(body.data);
+
+      if (!result.ok) {
+        sendApplicationError(reply, result.error);
+        return;
+      }
+
+      reply.code(200).send(toAuthResponse(result.value));
+    },
+
+    async me(request: FastifyRequest, reply: FastifyReply): Promise<void> {
+      const principal = principalOf(request);
+
+      const result = await getCustomer({ id: principal.customerId });
+
+      if (!result.ok) {
+        sendApplicationError(reply, result.error);
+        return;
+      }
+
+      reply.code(200).send({
+        customer: toCustomerResponse(result.value),
+        role: principal.role,
+      });
+    },
+  };
+}
+
+export type AuthController = ReturnType<typeof createAuthController>;
+
+````
 ````ecommerce-backend/src/infrastructure/http/controllers/cart-controller.ts
 import type { FastifyReply, FastifyRequest } from "fastify";
+import {
+  canActForCustomer,
+  FORBIDDEN,
+} from "../../../application/auth/access-policy.js";
 import type { AddItem } from "../../../application/cart/add-item/add-item.types.js";
 import type { GetCart } from "../../../application/cart/get-cart/get-cart.types.js";
 import type { RemoveItem } from "../../../application/cart/remove-item/remove-item.types.js";
+import { principalOf } from "../auth-guards.js";
 import { sendApplicationError } from "../http-errors.js";
 import { toCartResponse } from "../presenters/cart-presenter.js";
 import {
@@ -4498,6 +5578,14 @@ export function createCartController({
         return;
       }
 
+      const principal = principalOf(request);
+
+      // A cart is private: only its owner (or an administrator) may read it.
+      if (!canActForCustomer(principal, params.data.customerId)) {
+        sendApplicationError(reply, FORBIDDEN);
+        return;
+      }
+
       const result = await getCart({ customerId: params.data.customerId });
 
       if (!result.ok) {
@@ -4514,6 +5602,13 @@ export function createCartController({
 
       if (!params.success || !body.success) {
         reply.code(400).send({ message: "Invalid request body" });
+        return;
+      }
+
+      const principal = principalOf(request);
+
+      if (!canActForCustomer(principal, params.data.customerId)) {
+        sendApplicationError(reply, FORBIDDEN);
         return;
       }
 
@@ -4542,6 +5637,13 @@ export function createCartController({
         return;
       }
 
+      const principal = principalOf(request);
+
+      if (!canActForCustomer(principal, params.data.customerId)) {
+        sendApplicationError(reply, FORBIDDEN);
+        return;
+      }
+
       const result = await removeItem({
         customerId: params.data.customerId,
         productId: params.data.productId,
@@ -4558,11 +5660,16 @@ export function createCartController({
 }
 
 export type CartController = ReturnType<typeof createCartController>;
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/controllers/checkout-controller.ts
 import type { FastifyReply, FastifyRequest } from "fastify";
+import {
+  canActForCustomer,
+  FORBIDDEN,
+} from "../../../application/auth/access-policy.js";
 import type { Checkout } from "../../../application/checkout/checkout.types.js";
+import { principalOf } from "../auth-guards.js";
 import { sendApplicationError } from "../http-errors.js";
 import { toCheckoutResponse } from "../presenters/checkout-presenter.js";
 import { checkoutBodySchema } from "../schemas/order-schemas.js";
@@ -4615,6 +5722,14 @@ export function createCheckoutController({
         return;
       }
 
+      const principal = principalOf(request);
+
+      // The cart being checked out must belong to the caller.
+      if (!canActForCustomer(principal, body.data.customerId)) {
+        sendApplicationError(reply, FORBIDDEN);
+        return;
+      }
+
       const result = await checkout(
         idempotencyKey.key === undefined
           ? { customerId: body.data.customerId }
@@ -4641,53 +5756,44 @@ export function createCheckoutController({
 }
 
 export type CheckoutController = ReturnType<typeof createCheckoutController>;
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/controllers/customer-controller.ts
 import type { FastifyReply, FastifyRequest } from "fastify";
-import type { CreateCustomer } from "../../../application/customer/create-customer/create-customer.types.js";
+import {
+  canActForCustomer,
+  FORBIDDEN,
+} from "../../../application/auth/access-policy.js";
 import type { GetCustomer } from "../../../application/customer/get-customer/get-customer.types.js";
+import { principalOf } from "../auth-guards.js";
 import { sendApplicationError } from "../http-errors.js";
 import { toCustomerResponse } from "../presenters/customer-presenter.js";
-import {
-  createCustomerBodySchema,
-  customerIdParamsSchema,
-} from "../schemas/customer-schemas.js";
+import { customerIdParamsSchema } from "../schemas/customer-schemas.js";
 
 type CustomerControllerDependencies = {
-  createCustomer: CreateCustomer;
   getCustomer: GetCustomer;
 };
 
-/** HTTP adapter for customers: parse, call a use case, present the result. */
+/**
+ * Registration lives at `/auth/register`, not here: a customer without
+ * credentials cannot be created. This controller only reads.
+ */
 export function createCustomerController({
-  createCustomer,
   getCustomer,
 }: CustomerControllerDependencies) {
   return {
-    async create(request: FastifyRequest, reply: FastifyReply): Promise<void> {
-      const body = createCustomerBodySchema.safeParse(request.body);
-
-      if (!body.success) {
-        reply.code(400).send({ message: "Invalid request body" });
-        return;
-      }
-
-      const result = await createCustomer(body.data);
-
-      if (!result.ok) {
-        sendApplicationError(reply, result.error);
-        return;
-      }
-
-      reply.code(201).send(toCustomerResponse(result.value));
-    },
-
     async getById(request: FastifyRequest, reply: FastifyReply): Promise<void> {
       const params = customerIdParamsSchema.safeParse(request.params);
 
       if (!params.success) {
         reply.code(400).send({ message: "Invalid customer id" });
+        return;
+      }
+
+      const principal = principalOf(request);
+
+      if (!canActForCustomer(principal, params.data.id)) {
+        sendApplicationError(reply, FORBIDDEN);
         return;
       }
 
@@ -4704,14 +5810,20 @@ export function createCustomerController({
 }
 
 export type CustomerController = ReturnType<typeof createCustomerController>;
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/controllers/order-controller.ts
 import type { FastifyReply, FastifyRequest } from "fastify";
+import {
+  canAccessOrder,
+  canActForCustomer,
+  FORBIDDEN,
+} from "../../../application/auth/access-policy.js";
 import type { CancelOrder } from "../../../application/order/cancel-order/cancel-order.types.js";
 import type { CreateOrder } from "../../../application/order/create-order/create-order.types.js";
 import type { GetOrder } from "../../../application/order/get-order/get-order.types.js";
 import type { ProcessPayment } from "../../../application/payment/process-payment/process-payment.types.js";
+import { principalOf } from "../auth-guards.js";
 import { sendApplicationError } from "../http-errors.js";
 import { toOrderResponse } from "../presenters/order-presenter.js";
 import { toPaymentResponse } from "../presenters/payment-presenter.js";
@@ -4742,6 +5854,14 @@ export function createOrderController({
         return;
       }
 
+      const principal = principalOf(request);
+
+      // Ordering on someone else's behalf is an administrator action.
+      if (!canActForCustomer(principal, body.data.customerId)) {
+        sendApplicationError(reply, FORBIDDEN);
+        return;
+      }
+
       const result = await createOrder({ customerId: body.data.customerId });
 
       if (!result.ok) {
@@ -4767,6 +5887,13 @@ export function createOrderController({
         return;
       }
 
+      const principal = principalOf(request);
+
+      if (!canAccessOrder(principal, result.value)) {
+        sendApplicationError(reply, FORBIDDEN);
+        return;
+      }
+
       reply.code(200).send(toOrderResponse(result.value));
     },
 
@@ -4775,6 +5902,20 @@ export function createOrderController({
 
       if (!params.success) {
         reply.code(400).send({ message: "Invalid order id" });
+        return;
+      }
+
+      const existing = await getOrder({ id: params.data.id });
+
+      if (!existing.ok) {
+        sendApplicationError(reply, existing.error);
+        return;
+      }
+
+      const principal = principalOf(request);
+
+      if (!canAccessOrder(principal, existing.value)) {
+        sendApplicationError(reply, FORBIDDEN);
         return;
       }
 
@@ -4796,6 +5937,20 @@ export function createOrderController({
         return;
       }
 
+      const existing = await getOrder({ id: params.data.id });
+
+      if (!existing.ok) {
+        sendApplicationError(reply, existing.error);
+        return;
+      }
+
+      const principal = principalOf(request);
+
+      if (!canAccessOrder(principal, existing.value)) {
+        sendApplicationError(reply, FORBIDDEN);
+        return;
+      }
+
       const result = await processPayment({ orderId: params.data.id });
 
       if (!result.ok) {
@@ -4812,8 +5967,8 @@ export function createOrderController({
 }
 
 export type OrderController = ReturnType<typeof createOrderController>;
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/controllers/product-controller.ts
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { CreateProduct } from "../../../application/product/create-product/create-product.types.js";
@@ -4895,14 +6050,17 @@ export function createProductController({
 }
 
 export type ProductController = ReturnType<typeof createProductController>;
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/fastify.ts
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import type { RateLimiter } from "../../application/ports/rate-limiter.js";
+import type { TokenService } from "../../application/ports/token-service.js";
 import type { HealthCheck } from "../health/health-check.js";
 import type { Metrics } from "../observability/metrics.js";
+import { registerAuthentication } from "./auth-guards.js";
+import type { AuthController } from "./controllers/auth-controller.js";
 import type { CartController } from "./controllers/cart-controller.js";
 import type { CheckoutController } from "./controllers/checkout-controller.js";
 import type { CustomerController } from "./controllers/customer-controller.js";
@@ -4910,6 +6068,7 @@ import type { OrderController } from "./controllers/order-controller.js";
 import type { ProductController } from "./controllers/product-controller.js";
 import { registerHealthRoutes } from "./health-routes.js";
 import { registerRateLimit } from "./rate-limit.js";
+import { registerAuthRoutes } from "./routes/auth-routes.js";
 import { registerCartRoutes } from "./routes/cart-routes.js";
 import { registerCheckoutRoutes } from "./routes/checkout-routes.js";
 import { registerCustomerRoutes } from "./routes/customer-routes.js";
@@ -4917,6 +6076,7 @@ import { registerOrderRoutes } from "./routes/order-routes.js";
 import { registerProductRoutes } from "./routes/product-routes.js";
 
 export type HttpControllers = {
+  auth: AuthController;
   customers: CustomerController;
   products: ProductController;
   carts: CartController;
@@ -4926,9 +6086,13 @@ export type HttpControllers = {
 
 type HttpAppOptions = {
   controllers: HttpControllers;
+  /** Verifies the bearer token that guards protected routes. */
+  tokens: TokenService;
   logger?: boolean;
   /** Omitted in tests that do not care about limiting. */
   rateLimiter?: RateLimiter;
+  /** Tighter budget for register/login; falls back to unlimited in tests. */
+  authRateLimiter?: RateLimiter;
   metrics?: Metrics;
   healthChecks?: HealthCheck[];
 };
@@ -4942,8 +6106,10 @@ type HttpAppOptions = {
  */
 export function buildHttpApp({
   controllers,
+  tokens,
   logger = true,
   rateLimiter,
+  authRateLimiter,
   metrics,
   healthChecks = [],
 }: HttpAppOptions): FastifyInstance {
@@ -4975,16 +6141,32 @@ export function buildHttpApp({
     });
   }
 
+  // Cheap, dependency-free defaults. Anything that would need a policy
+  // decision per route (CSP, CORS) is left to the deployment edge.
   app.addHook("onSend", async (request, reply, payload) => {
     reply.header("x-request-id", request.id);
+    reply.header("x-content-type-options", "nosniff");
+    reply.header("x-frame-options", "DENY");
+    reply.header("referrer-policy", "no-referrer");
+
+    // Token and profile responses must never be stored by a shared cache.
+    if (request.url.startsWith("/auth/")) {
+      reply.header("cache-control", "no-store");
+    }
+
     return payload;
   });
+
+  // Authentication is extracted once for every route; the guards decide who
+  // may continue, and public routes simply ignore a missing principal.
+  registerAuthentication(app, tokens);
 
   registerHealthRoutes(app, {
     checks: healthChecks,
     ...(metrics === undefined ? {} : { metrics }),
   });
 
+  registerAuthRoutes(app, controllers.auth, authRateLimiter);
   registerCustomerRoutes(app, controllers.customers);
   registerProductRoutes(app, controllers.products);
   registerCartRoutes(app, controllers.carts);
@@ -5010,8 +6192,8 @@ export function buildHttpApp({
 
   return app;
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/health-routes.ts
 import type { FastifyInstance } from "fastify";
 import type { Metrics } from "../observability/metrics.js";
@@ -5050,8 +6232,8 @@ export function registerHealthRoutes(
     });
   }
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/http-errors.ts
 import type { FastifyReply } from "fastify";
 
@@ -5060,6 +6242,8 @@ import type { FastifyReply } from "fastify";
  * the mapping, so this table only holds the types that need a specific code.
  */
 const EXPLICIT_STATUSES: Record<string, number> = {
+  invalid_credentials: 401,
+  forbidden: 403,
   invalid_customer: 400,
   invalid_product: 400,
   invalid_inventory: 400,
@@ -5080,6 +6264,14 @@ const EXPLICIT_STATUSES: Record<string, number> = {
 };
 
 export function statusForError(errorType: string): number {
+  // The table wins over the suffix conventions: `invalid_credentials` is an
+  // authentication failure (401), not a malformed request (400).
+  const explicit = EXPLICIT_STATUSES[errorType];
+
+  if (explicit !== undefined) {
+    return explicit;
+  }
+
   if (errorType.endsWith("_not_found")) {
     return 404;
   }
@@ -5088,7 +6280,7 @@ export function statusForError(errorType: string): number {
     return 400;
   }
 
-  return EXPLICIT_STATUSES[errorType] ?? 500;
+  return 500;
 }
 
 /**
@@ -5108,8 +6300,43 @@ export function sendApplicationError(
 
   reply.code(status).send({ message: error.message });
 }
-````
 
+````
+````ecommerce-backend/src/infrastructure/http/presenters/auth-presenter.ts
+import type { AuthenticatedSession } from "../../../application/auth/session.js";
+import {
+  toCustomerResponse,
+  type CustomerResponse,
+} from "./customer-presenter.js";
+
+export type AuthResponse = {
+  customer: CustomerResponse;
+  role: string;
+  accessToken: {
+    token: string;
+    tokenType: "Bearer";
+    expiresAt: string;
+  };
+};
+
+/** The credential record itself never leaves the process. */
+export function toAuthResponse({
+  customer,
+  role,
+  accessToken,
+}: AuthenticatedSession): AuthResponse {
+  return {
+    customer: toCustomerResponse(customer),
+    role,
+    accessToken: {
+      token: accessToken.token,
+      tokenType: "Bearer",
+      expiresAt: accessToken.expiresAt,
+    },
+  };
+}
+
+````
 ````ecommerce-backend/src/infrastructure/http/presenters/cart-presenter.ts
 import {
   cartItemCount,
@@ -5160,8 +6387,8 @@ export function toCartResponse(cart: Cart): CartResponse {
     updatedAt: cart.updatedAt,
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/presenters/checkout-presenter.ts
 import type { CheckoutOutcome } from "../../../application/checkout/checkout.types.js";
 import { toOrderResponse, type OrderResponse } from "./order-presenter.js";
@@ -5184,8 +6411,8 @@ export function toCheckoutResponse(outcome: CheckoutOutcome): CheckoutResponse {
     replayed: outcome.replayed,
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/presenters/customer-presenter.ts
 import type { Customer } from "../../../domain/customer/customer.js";
 
@@ -5205,8 +6432,8 @@ export function toCustomerResponse(customer: Customer): CustomerResponse {
     createdAt: customer.createdAt,
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/presenters/order-presenter.ts
 import type { Order } from "../../../domain/order/order.js";
 
@@ -5265,8 +6492,8 @@ export function toOrderResponse(order: Order): OrderResponse {
     cancelledAt: order.cancelledAt,
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/presenters/payment-presenter.ts
 import type { Payment } from "../../../domain/payment/payment.js";
 
@@ -5299,8 +6526,8 @@ export function toPaymentResponse(payment: Payment): PaymentResponse {
     updatedAt: payment.updatedAt,
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/presenters/product-presenter.ts
 import type { Product } from "../../../domain/product/product.js";
 
@@ -5325,10 +6552,10 @@ export function toProductResponse(product: Product): ProductResponse {
     createdAt: product.createdAt,
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/rate-limit.ts
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, preHandlerHookHandler } from "fastify";
 import type { RateLimiter } from "../../application/ports/rate-limiter.js";
 
 const EXEMPT_PATHS = new Set(["/health", "/ready", "/metrics"]);
@@ -5341,6 +6568,41 @@ const EXEMPT_PATHS = new Set(["/health", "/ready", "/metrics"]);
  * If the limiter fails (Redis outage) the request is allowed through: refusing
  * all traffic because the counter store is down is worse than under-limiting.
  */
+export function createAuthRateLimitHook(
+  limiter: RateLimiter,
+): preHandlerHookHandler {
+  /**
+   * Credential endpoints carry a much smaller budget than the API default, so
+   * password guessing is expensive even from a single address. The key is
+   * namespaced, so this counter cannot collide with the general limiter.
+   */
+  return async (request, reply) => {
+    const route =
+      (request as { routeOptions?: { url?: string } }).routeOptions?.url ??
+      request.url;
+
+    try {
+      const decision = await limiter.consume(`auth:${request.ip}:${route}`);
+
+      if (!decision.allowed) {
+        request.log.warn({ route, ip: request.ip }, "Auth rate limit exceeded");
+
+        reply
+          .header("retry-after", decision.resetInSeconds)
+          .code(429)
+          .send({ message: "Too many authentication attempts" });
+      }
+    } catch (error) {
+      // Same policy as the general limiter: an unavailable counter store must
+      // not lock every user out of the API.
+      request.log.error(
+        { err: error },
+        "Auth rate limiter unavailable; allowing",
+      );
+    }
+  };
+}
+
 export function registerRateLimit(
   app: FastifyInstance,
   limiter: RateLimiter,
@@ -5377,39 +6639,76 @@ export function registerRateLimit(
     }
   });
 }
-````
 
+````
+````ecommerce-backend/src/infrastructure/http/routes/auth-routes.ts
+import type { FastifyInstance } from "fastify";
+import type { RateLimiter } from "../../../application/ports/rate-limiter.js";
+import { requireAuth } from "../auth-guards.js";
+import type { AuthController } from "../controllers/auth-controller.js";
+import { createAuthRateLimitHook } from "../rate-limit.js";
+
+/**
+ * Authentication endpoints get a tighter budget than the rest of the API, and
+ * `/auth/me` proves the token round trip. No route here ever returns a hash.
+ */
+export function registerAuthRoutes(
+  app: FastifyInstance,
+  controller: AuthController,
+  rateLimiter?: RateLimiter,
+): void {
+  const authOptions =
+    rateLimiter === undefined
+      ? {}
+      : { preHandler: createAuthRateLimitHook(rateLimiter) };
+
+  app.post("/auth/register", authOptions, controller.register);
+  app.post("/auth/login", authOptions, controller.login);
+  app.get("/auth/me", { preHandler: requireAuth }, controller.me);
+}
+
+````
 ````ecommerce-backend/src/infrastructure/http/routes/cart-routes.ts
 import type { FastifyInstance } from "fastify";
+import { requireAuth } from "../auth-guards.js";
 import type { CartController } from "../controllers/cart-controller.js";
 
 export function registerCartRoutes(
   app: FastifyInstance,
   controller: CartController,
 ): void {
-  app.get("/customers/:customerId/cart", controller.get);
-  app.post("/customers/:customerId/cart/items", controller.addItem);
+  const preHandler = requireAuth;
+
+  app.get("/customers/:customerId/cart", { preHandler }, controller.get);
+  app.post(
+    "/customers/:customerId/cart/items",
+    { preHandler },
+    controller.addItem,
+  );
   app.delete(
     "/customers/:customerId/cart/items/:productId",
+    { preHandler },
     controller.removeItem,
   );
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/routes/checkout-routes.ts
 import type { FastifyInstance } from "fastify";
+import { requireAuth } from "../auth-guards.js";
 import type { CheckoutController } from "../controllers/checkout-controller.js";
 
 export function registerCheckoutRoutes(
   app: FastifyInstance,
   controller: CheckoutController,
 ): void {
-  app.post("/checkout", controller.checkout);
+  app.post("/checkout", { preHandler: requireAuth }, controller.checkout);
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/routes/customer-routes.ts
 import type { FastifyInstance } from "fastify";
+import { requireAuth } from "../auth-guards.js";
 import type { CustomerController } from "../controllers/customer-controller.js";
 
 /** Path to handler mapping only; no behaviour lives here. */
@@ -5417,40 +6716,76 @@ export function registerCustomerRoutes(
   app: FastifyInstance,
   controller: CustomerController,
 ): void {
-  app.post("/customers", controller.create);
-  app.get("/customers/:id", controller.getById);
+  app.get("/customers/:id", { preHandler: requireAuth }, controller.getById);
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/routes/order-routes.ts
 import type { FastifyInstance } from "fastify";
+import { requireAuth } from "../auth-guards.js";
 import type { OrderController } from "../controllers/order-controller.js";
 
 export function registerOrderRoutes(
   app: FastifyInstance,
   controller: OrderController,
 ): void {
-  app.post("/orders", controller.create);
-  app.get("/orders/:id", controller.getById);
-  app.post("/orders/:id/cancel", controller.cancel);
-  app.post("/orders/:id/pay", controller.pay);
-}
-````
+  const preHandler = requireAuth;
 
+  app.post("/orders", { preHandler }, controller.create);
+  app.get("/orders/:id", { preHandler }, controller.getById);
+  app.post("/orders/:id/cancel", { preHandler }, controller.cancel);
+  app.post("/orders/:id/pay", { preHandler }, controller.pay);
+}
+
+````
 ````ecommerce-backend/src/infrastructure/http/routes/product-routes.ts
 import type { FastifyInstance } from "fastify";
+import { requireAdmin, requireAuth } from "../auth-guards.js";
 import type { ProductController } from "../controllers/product-controller.js";
 
+/**
+ * The catalogue is public; writing to it is an administrative action. The role
+ * check is a route guard here because it depends on nothing but the token.
+ */
 export function registerProductRoutes(
   app: FastifyInstance,
   controller: ProductController,
 ): void {
-  app.post("/products", controller.create);
+  app.post(
+    "/products",
+    { preHandler: [requireAuth, requireAdmin] },
+    controller.create,
+  );
   app.get("/products", controller.list);
   app.get("/products/:id", controller.getById);
 }
-````
 
+````
+````ecommerce-backend/src/infrastructure/http/schemas/auth-schemas.ts
+import { z } from "zod";
+
+/**
+ * The edge validates shape, not policy: password length is a domain rule, so
+ * its failure keeps a specific message ("at least 12 characters") instead of a
+ * generic "invalid request body". The upper bound only limits work done on
+ * absurd payloads.
+ */
+export const registerBodySchema = z
+  .object({
+    email: z.string().min(3).max(320),
+    name: z.string().min(1).max(120),
+    password: z.string().min(1).max(1_024),
+  })
+  .strict();
+
+export const loginBodySchema = z
+  .object({
+    email: z.string().min(3).max(320),
+    password: z.string().min(1).max(1_024),
+  })
+  .strict();
+
+````
 ````ecommerce-backend/src/infrastructure/http/schemas/cart-schemas.ts
 import { z } from "zod";
 
@@ -5469,23 +6804,16 @@ export const addItemBodySchema = z
     quantity: z.number().int().positive(),
   })
   .strict();
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/schemas/customer-schemas.ts
 import { z } from "zod";
-
-export const createCustomerBodySchema = z
-  .object({
-    email: z.string(),
-    name: z.string(),
-  })
-  .strict();
 
 export const customerIdParamsSchema = z.object({
   id: z.string().min(1),
 });
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/schemas/order-schemas.ts
 import { z } from "zod";
 
@@ -5500,8 +6828,8 @@ export const createOrderBodySchema = z
   .strict();
 
 export const checkoutBodySchema = createOrderBodySchema;
-````
 
+````
 ````ecommerce-backend/src/infrastructure/http/schemas/product-schemas.ts
 import { z } from "zod";
 
@@ -5521,8 +6849,8 @@ export const createProductBodySchema = z
 export const productIdParamsSchema = z.object({
   id: z.string().min(1),
 });
-````
 
+````
 ````ecommerce-backend/src/infrastructure/idempotency/in-memory-idempotency-store.ts
 import type {
   IdempotencyRecord,
@@ -5600,8 +6928,8 @@ export function createInMemoryIdempotencyStore(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/inbox/in-memory-inbox-store.ts
 import type { InboxStore } from "../../application/ports/inbox-store.js";
 
@@ -5624,8 +6952,8 @@ export function createInMemoryInboxStore(): InboxStore {
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/kafka/kafka-event-publisher.ts
 import { Kafka, Partitioners, type Producer } from "kafkajs";
 import type { EventPublisher } from "../../application/ports/event-publisher.js";
@@ -5708,8 +7036,8 @@ export function createKafkaEventPublisher({
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/kafka/kafka-messages.ts
 import type { DomainEvent } from "../../domain/shared/domain-event.js";
 
@@ -5775,8 +7103,8 @@ export function toKafkaMessage(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/kafka/kafka-topics.ts
 import { Kafka } from "kafkajs";
 import { KAFKA_TOPICS } from "./kafka-messages.js";
@@ -5831,8 +7159,8 @@ export async function ensureKafkaTopics({
     await admin.disconnect();
   }
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/kafka/order-events-consumer.ts
 import { Kafka, type Consumer, type EachMessagePayload } from "kafkajs";
 import type { InboxStore } from "../../application/ports/inbox-store.js";
@@ -5939,8 +7267,8 @@ export function createOrderEventsConsumer({
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/observability/metrics.ts
 import {
   Counter,
@@ -6046,8 +7374,8 @@ export function createMetrics(): Metrics {
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/outbox/outbox-worker.ts
 import type { DispatchOutbox } from "../../application/outbox/dispatch-outbox.types.js";
 
@@ -6127,8 +7455,8 @@ export function createOutboxWorker({
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/payments/in-memory-payment-gateway.ts
 import type {
   PaymentGateway,
@@ -6183,10 +7511,11 @@ export function createInMemoryPaymentGateway(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/in-memory/store.ts
 import type { OutboxMessage } from "../../../application/ports/outbox.js";
+import type { Account } from "../../../domain/auth/account.js";
 import type { Cart, CartId } from "../../../domain/cart/cart.js";
 import type { Customer } from "../../../domain/customer/customer.js";
 import type { CustomerId } from "../../../domain/customer/customer-id.js";
@@ -6198,6 +7527,7 @@ import type { ProductId } from "../../../domain/product/product-id.js";
 /** Every table the in-memory adapters keep, in one swappable object. */
 export type InMemoryStore = {
   customers: Map<CustomerId, Customer>;
+  accounts: Map<CustomerId, Account>;
   products: Map<ProductId, Product>;
   inventory: Map<ProductId, InventoryItem>;
   carts: Map<CartId, Cart>;
@@ -6218,6 +7548,7 @@ export function createInMemoryStore(): InMemoryStoreRef {
   return {
     current: {
       customers: new Map(),
+      accounts: new Map(),
       products: new Map(),
       inventory: new Map(),
       carts: new Map(),
@@ -6226,8 +7557,38 @@ export function createInMemoryStore(): InMemoryStoreRef {
     },
   };
 }
-````
 
+````
+````ecommerce-backend/src/infrastructure/persistence/prisma/prisma-account-repository.ts
+import type { PrismaClient } from "@prisma/client";
+import type { AccountRepository } from "../../../application/ports/repositories/account-repository.js";
+import { fromAccountRow, toAccountRow } from "./prisma-mappers.js";
+import { currentPrismaClient } from "./prisma-session.js";
+
+export function createPrismaAccountRepository(
+  prisma: PrismaClient,
+): AccountRepository {
+  const db = () => currentPrismaClient() ?? prisma;
+
+  return {
+    async save(account) {
+      const data = toAccountRow(account);
+
+      await db().account.upsert({
+        where: { customerId: account.customerId },
+        create: data,
+        update: data,
+      });
+    },
+
+    async findByCustomerId(customerId) {
+      const row = await db().account.findUnique({ where: { customerId } });
+      return row === null ? null : fromAccountRow(row);
+    },
+  };
+}
+
+````
 ````ecommerce-backend/src/infrastructure/persistence/prisma/prisma-cart-repository.ts
 import type { PrismaClient } from "@prisma/client";
 import type { CartRepository } from "../../../application/ports/repositories/cart-repository.js";
@@ -6261,8 +7622,8 @@ export function createPrismaCartRepository(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/prisma/prisma-client.ts
 import { PrismaClient } from "@prisma/client";
 
@@ -6294,8 +7655,8 @@ export async function connectPrisma(url: string): Promise<PrismaConnection> {
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/prisma/prisma-customer-repository.ts
 import type { PrismaClient } from "@prisma/client";
 import type { CustomerRepository } from "../../../application/ports/repositories/customer-repository.js";
@@ -6331,11 +7692,12 @@ export function createPrismaCustomerRepository(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/prisma/prisma-dependencies.ts
 import type { InboxStore } from "../../../application/ports/inbox-store.js";
 import type { OutboxRepository } from "../../../application/ports/outbox.js";
+import type { AccountRepository } from "../../../application/ports/repositories/account-repository.js";
 import type { CartRepository } from "../../../application/ports/repositories/cart-repository.js";
 import type { CustomerRepository } from "../../../application/ports/repositories/customer-repository.js";
 import type { InventoryRepository } from "../../../application/ports/repositories/inventory-repository.js";
@@ -6343,6 +7705,7 @@ import type { OrderRepository } from "../../../application/ports/repositories/or
 import type { ProductRepository } from "../../../application/ports/repositories/product-repository.js";
 import type { UnitOfWork } from "../../../application/ports/unit-of-work.js";
 import { createPrismaUnitOfWork } from "../../transactions/prisma-unit-of-work.js";
+import { createPrismaAccountRepository } from "./prisma-account-repository.js";
 import { connectPrisma } from "./prisma-client.js";
 import { createPrismaCartRepository } from "./prisma-cart-repository.js";
 import { createPrismaCustomerRepository } from "./prisma-customer-repository.js";
@@ -6354,6 +7717,7 @@ import { createPrismaProductRepository } from "./prisma-product-repository.js";
 
 export type PersistenceDependencies = {
   customers: CustomerRepository;
+  accounts: AccountRepository;
   products: ProductRepository;
   inventory: InventoryRepository;
   carts: CartRepository;
@@ -6381,6 +7745,7 @@ export async function buildPrismaPersistence({
 
   return {
     customers: createPrismaCustomerRepository(connection.client),
+    accounts: createPrismaAccountRepository(connection.client),
     products: createPrismaProductRepository(connection.client),
     inventory: createPrismaInventoryRepository(connection.client),
     carts: createPrismaCartRepository(connection.client),
@@ -6392,8 +7757,8 @@ export async function buildPrismaPersistence({
     close: connection.close,
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/prisma/prisma-inbox-store.ts
 import type { PrismaClient } from "@prisma/client";
 import type { InboxStore } from "../../../application/ports/inbox-store.js";
@@ -6421,8 +7786,8 @@ export function createPrismaInboxStore(prisma: PrismaClient): InboxStore {
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/prisma/prisma-inventory-repository.ts
 import type { PrismaClient } from "@prisma/client";
 import type { InventoryRepository } from "../../../application/ports/repositories/inventory-repository.js";
@@ -6455,11 +7820,13 @@ export function createPrismaInventoryRepository(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/prisma/prisma-mappers.ts
 import type { Prisma } from "@prisma/client";
 import type { OutboxMessage } from "../../../application/ports/outbox.js";
+import type { Account } from "../../../domain/auth/account.js";
+import { isRole } from "../../../domain/auth/role.js";
 import type { Cart as CartAggregate } from "../../../domain/cart/cart.js";
 import type { CartItem } from "../../../domain/cart/cart-item.js";
 import type { Customer } from "../../../domain/customer/customer.js";
@@ -6504,6 +7871,36 @@ export function toCustomerRow(customer: Customer) {
     email: customer.email,
     name: customer.name,
     createdAt: toDate(customer.createdAt),
+  };
+}
+
+export type AccountRow = {
+  customerId: string;
+  passwordHash: string;
+  role: string;
+  createdAt: Date;
+  updatedAt: Date;
+};
+
+export function fromAccountRow(row: AccountRow): Account {
+  return {
+    customerId: row.customerId,
+    passwordHash: row.passwordHash,
+    // An unreadable role is downgraded, never guessed upward: a corrupted row
+    // must not become an administrator.
+    role: isRole(row.role) ? row.role : "customer",
+    createdAt: toIso(row.createdAt),
+    updatedAt: toIso(row.updatedAt),
+  };
+}
+
+export function toAccountRow(account: Account) {
+  return {
+    customerId: account.customerId,
+    passwordHash: account.passwordHash,
+    role: account.role,
+    createdAt: toDate(account.createdAt),
+    updatedAt: toDate(account.updatedAt),
   };
 }
 
@@ -6685,8 +8082,8 @@ export function toOutboxRow(message: OutboxMessage) {
       message.deadLetteredAt === null ? null : toDate(message.deadLetteredAt),
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/prisma/prisma-order-repository.ts
 import type { PrismaClient } from "@prisma/client";
 import type { OrderRepository } from "../../../application/ports/repositories/order-repository.js";
@@ -6724,8 +8121,8 @@ export function createPrismaOrderRepository(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/prisma/prisma-outbox-repository.ts
 import type { PrismaClient } from "@prisma/client";
 import type { OutboxRepository } from "../../../application/ports/outbox.js";
@@ -6794,8 +8191,8 @@ export function createPrismaOutboxRepository(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/prisma/prisma-product-repository.ts
 import type { PrismaClient } from "@prisma/client";
 import type { ProductRepository } from "../../../application/ports/repositories/product-repository.js";
@@ -6832,8 +8229,8 @@ export function createPrismaProductRepository(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/prisma/prisma-session.ts
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Prisma } from "@prisma/client";
@@ -6856,8 +8253,29 @@ export function runWithPrismaClient<T>(
 export function currentPrismaClient(): Prisma.TransactionClient | undefined {
   return storage.getStore();
 }
-````
 
+````
+````ecommerce-backend/src/infrastructure/persistence/repositories/in-memory-account-repository.ts
+import type { AccountRepository } from "../../../application/ports/repositories/account-repository.js";
+import type { InMemoryStoreRef } from "../in-memory/store.js";
+
+/** Copies on read and write so callers can never mutate stored state. */
+export function createInMemoryAccountRepository(
+  store: InMemoryStoreRef,
+): AccountRepository {
+  return {
+    async save(account) {
+      store.current.accounts.set(account.customerId, { ...account });
+    },
+
+    async findByCustomerId(customerId) {
+      const account = store.current.accounts.get(customerId);
+      return account ? { ...account } : null;
+    },
+  };
+}
+
+````
 ````ecommerce-backend/src/infrastructure/persistence/repositories/in-memory-cart-repository.ts
 import type { CartRepository } from "../../../application/ports/repositories/cart-repository.js";
 import type { Cart } from "../../../domain/cart/cart.js";
@@ -6897,8 +8315,8 @@ export function createInMemoryCartRepository(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/repositories/in-memory-customer-repository.ts
 import type { CustomerRepository } from "../../../application/ports/repositories/customer-repository.js";
 import type { InMemoryStoreRef } from "../in-memory/store.js";
@@ -6930,8 +8348,8 @@ export function createInMemoryCustomerRepository(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/repositories/in-memory-inventory-repository.ts
 import type { InventoryRepository } from "../../../application/ports/repositories/inventory-repository.js";
 import type { InMemoryStoreRef } from "../in-memory/store.js";
@@ -6951,8 +8369,8 @@ export function createInMemoryInventoryRepository(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/repositories/in-memory-order-repository.ts
 import type { OrderRepository } from "../../../application/ports/repositories/order-repository.js";
 import type { Order } from "../../../domain/order/order.js";
@@ -6991,8 +8409,8 @@ export function createInMemoryOrderRepository(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/repositories/in-memory-outbox-repository.ts
 import type { OutboxRepository } from "../../../application/ports/outbox.js";
 import type { InMemoryStoreRef } from "../in-memory/store.js";
@@ -7061,8 +8479,8 @@ export function createInMemoryOutboxRepository(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/persistence/repositories/in-memory-product-repository.ts
 import type { ProductRepository } from "../../../application/ports/repositories/product-repository.js";
 import type { InMemoryStoreRef } from "../in-memory/store.js";
@@ -7087,8 +8505,8 @@ export function createInMemoryProductRepository(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/rate-limit/in-memory-rate-limiter.ts
 import type {
   RateLimitDecision,
@@ -7150,8 +8568,8 @@ export function createInMemoryRateLimiter({
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/redis/redis-cache.ts
 import type { Redis } from "ioredis";
 import type { Cache } from "../../application/ports/cache.js";
@@ -7189,8 +8607,8 @@ export function createRedisCache(client: Redis, prefix = "cache:"): Cache {
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/redis/redis-client.ts
 import { Redis } from "ioredis";
 
@@ -7229,8 +8647,8 @@ export async function connectRedis(url: string): Promise<RedisConnection> {
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/redis/redis-idempotency-store.ts
 import type { Redis } from "ioredis";
 import type {
@@ -7298,8 +8716,8 @@ export function createRedisIdempotencyStore(client: Redis): IdempotencyStore {
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/redis/redis-rate-limiter.ts
 import type { Redis } from "ioredis";
 import type {
@@ -7352,8 +8770,8 @@ export function createRedisRateLimiter(
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/system/system-clock.ts
 import type { Clock } from "../../application/ports/clock.js";
 
@@ -7363,8 +8781,8 @@ export function createSystemClock(): Clock {
     now: () => new Date().toISOString(),
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/system/uuid-generator.ts
 import { randomUUID } from "node:crypto";
 import type { IdGenerator } from "../../application/ports/id-generator.js";
@@ -7374,8 +8792,8 @@ export function createUuidGenerator(): IdGenerator {
     nextId: () => randomUUID(),
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/transactions/in-memory-unit-of-work.ts
 import type {
   UnitOfWork,
@@ -7440,8 +8858,8 @@ export function createInMemoryUnitOfWork(store: InMemoryStoreRef): UnitOfWork {
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/infrastructure/transactions/prisma-unit-of-work.ts
 import { Prisma, type PrismaClient } from "@prisma/client";
 import type {
@@ -7536,9 +8954,13 @@ export function createPrismaUnitOfWork(prisma: PrismaClient): UnitOfWork {
     },
   };
 }
-````
 
+````
 ````ecommerce-backend/src/main/container.ts
+import { loginUseCase } from "../application/auth/login/login.js";
+import type { Login } from "../application/auth/login/login.types.js";
+import { registerUseCase } from "../application/auth/register/register.js";
+import type { Register } from "../application/auth/register/register.types.js";
 import { addItemUseCase } from "../application/cart/add-item/add-item.js";
 import type { AddItem } from "../application/cart/add-item/add-item.types.js";
 import { getCartUseCase } from "../application/cart/get-cart/get-cart.js";
@@ -7547,8 +8969,6 @@ import { removeItemUseCase } from "../application/cart/remove-item/remove-item.j
 import type { RemoveItem } from "../application/cart/remove-item/remove-item.types.js";
 import { checkoutUseCase } from "../application/checkout/checkout.js";
 import type { Checkout } from "../application/checkout/checkout.types.js";
-import { createCustomerUseCase } from "../application/customer/create-customer/create-customer.js";
-import type { CreateCustomer } from "../application/customer/create-customer/create-customer.types.js";
 import { getCustomerUseCase } from "../application/customer/get-customer/get-customer.js";
 import type { GetCustomer } from "../application/customer/get-customer/get-customer.types.js";
 import { cancelOrderUseCase } from "../application/order/cancel-order/cancel-order.js";
@@ -7565,15 +8985,18 @@ import type { Cache } from "../application/ports/cache.js";
 import type { Clock } from "../application/ports/clock.js";
 import type { IdGenerator } from "../application/ports/id-generator.js";
 import type { OutboxRepository } from "../application/ports/outbox.js";
+import type { PasswordHasher } from "../application/ports/password-hasher.js";
 import type { PaymentGateway } from "../application/ports/payment-gateway.js";
 import type { EventPublisher } from "../application/ports/event-publisher.js";
 import type { IdempotencyStore } from "../application/ports/idempotency-store.js";
 import type { RateLimiter } from "../application/ports/rate-limiter.js";
+import type { AccountRepository } from "../application/ports/repositories/account-repository.js";
 import type { CartRepository } from "../application/ports/repositories/cart-repository.js";
 import type { CustomerRepository } from "../application/ports/repositories/customer-repository.js";
 import type { InventoryRepository } from "../application/ports/repositories/inventory-repository.js";
 import type { OrderRepository } from "../application/ports/repositories/order-repository.js";
 import type { ProductRepository } from "../application/ports/repositories/product-repository.js";
+import type { TokenService } from "../application/ports/token-service.js";
 import type { UnitOfWork } from "../application/ports/unit-of-work.js";
 import { createProductUseCase } from "../application/product/create-product/create-product.js";
 import type { CreateProduct } from "../application/product/create-product/create-product.types.js";
@@ -7581,9 +9004,12 @@ import { getProductUseCase } from "../application/product/get-product/get-produc
 import type { GetProduct } from "../application/product/get-product/get-product.types.js";
 import { listProductsUseCase } from "../application/product/list-products/list-products.js";
 import type { ListProducts } from "../application/product/list-products/list-products.types.js";
+import { createJwtTokenService } from "../infrastructure/auth/jwt-token-service.js";
+import { createScryptPasswordHasher } from "../infrastructure/auth/scrypt-password-hasher.js";
 import { createInMemoryCache } from "../infrastructure/cache/in-memory-cache.js";
 import { createConsoleEventPublisher } from "../infrastructure/events/console-event-publisher.js";
 import type { HealthCheck } from "../infrastructure/health/health-check.js";
+import { createAuthController } from "../infrastructure/http/controllers/auth-controller.js";
 import { createCartController } from "../infrastructure/http/controllers/cart-controller.js";
 import { createCheckoutController } from "../infrastructure/http/controllers/checkout-controller.js";
 import { createCustomerController } from "../infrastructure/http/controllers/customer-controller.js";
@@ -7609,6 +9035,7 @@ import {
 import { createInMemoryPaymentGateway } from "../infrastructure/payments/in-memory-payment-gateway.js";
 import { createInMemoryStore } from "../infrastructure/persistence/in-memory/store.js";
 import { buildPrismaPersistence } from "../infrastructure/persistence/prisma/prisma-dependencies.js";
+import { createInMemoryAccountRepository } from "../infrastructure/persistence/repositories/in-memory-account-repository.js";
 import { createInMemoryCartRepository } from "../infrastructure/persistence/repositories/in-memory-cart-repository.js";
 import { createInMemoryCustomerRepository } from "../infrastructure/persistence/repositories/in-memory-customer-repository.js";
 import { createInMemoryInventoryRepository } from "../infrastructure/persistence/repositories/in-memory-inventory-repository.js";
@@ -7630,6 +9057,7 @@ import { createInMemoryUnitOfWork } from "../infrastructure/transactions/in-memo
  */
 export type ContainerDependencies = {
   customers: CustomerRepository;
+  accounts: AccountRepository;
   products: ProductRepository;
   inventory: InventoryRepository;
   carts: CartRepository;
@@ -7645,7 +9073,8 @@ export type ContainerDependencies = {
 };
 
 export type UseCases = {
-  createCustomer: CreateCustomer;
+  register: Register;
+  login: Login;
   getCustomer: GetCustomer;
   createProduct: CreateProduct;
   getProduct: GetProduct;
@@ -7672,6 +9101,7 @@ export function buildInMemoryDependencies(): ContainerDependencies {
 
   return {
     customers: createInMemoryCustomerRepository(store),
+    accounts: createInMemoryAccountRepository(store),
     products: createInMemoryProductRepository(store),
     inventory: createInMemoryInventoryRepository(store),
     carts: createInMemoryCartRepository(store),
@@ -7687,7 +9117,16 @@ export function buildInMemoryDependencies(): ContainerDependencies {
   };
 }
 
-export function buildUseCases(dependencies: ContainerDependencies): UseCases {
+export type AuthDependencies = {
+  hasher: PasswordHasher;
+  tokens: TokenService;
+};
+
+export function buildUseCases(
+  dependencies: ContainerDependencies,
+  auth: AuthDependencies,
+  options: { bootstrapAdminEmails?: readonly string[] } = {},
+): UseCases {
   // Every use case that writes more than one row receives the same boundary.
   const transactional = {
     ids: dependencies.ids,
@@ -7717,9 +9156,19 @@ export function buildUseCases(dependencies: ContainerDependencies): UseCases {
   });
 
   return {
-    createCustomer: createCustomerUseCase({
+    register: registerUseCase({
       customers: dependencies.customers,
+      accounts: dependencies.accounts,
+      hasher: auth.hasher,
+      tokens: auth.tokens,
+      bootstrapAdminEmails: options.bootstrapAdminEmails ?? [],
       ...transactional,
+    }),
+    login: loginUseCase({
+      customers: dependencies.customers,
+      accounts: dependencies.accounts,
+      hasher: auth.hasher,
+      tokens: auth.tokens,
     }),
     getCustomer: getCustomerUseCase({ customers: dependencies.customers }),
     createProduct: createProductUseCase({
@@ -7767,8 +9216,12 @@ export function buildUseCases(dependencies: ContainerDependencies): UseCases {
 
 export function buildControllers(useCases: UseCases): HttpControllers {
   return {
+    auth: createAuthController({
+      register: useCases.register,
+      login: useCases.login,
+      getCustomer: useCases.getCustomer,
+    }),
     customers: createCustomerController({
-      createCustomer: useCases.createCustomer,
       getCustomer: useCases.getCustomer,
     }),
     products: createProductController({
@@ -7803,13 +9256,26 @@ export type ContainerOptions = {
     consumerGroup: string;
   } | null;
   rateLimit: { max: number; windowSeconds: number };
+  auth: {
+    secret: string;
+    issuer: string;
+    audience: string;
+    ttlSeconds: number;
+    /** Register/login get a tighter budget than the rest of the API. */
+    rateLimit: { max: number; windowSeconds: number };
+    /** Addresses that become administrators when they register. */
+    bootstrapAdminEmails: readonly string[];
+  };
 };
 
 export type Container = {
   useCases: UseCases;
   controllers: HttpControllers;
+  /** One verifier for the server; routes and tokens cannot disagree. */
+  tokens: TokenService;
   metrics: Metrics;
   rateLimiter: RateLimiter;
+  authRateLimiter: RateLimiter;
   healthChecks: HealthCheck[];
   /** Connects background consumers. Safe to call once. */
   start(): Promise<void>;
@@ -7833,7 +9299,15 @@ export async function buildContainer({
   redis,
   kafka,
   rateLimit,
+  auth,
 }: ContainerOptions): Promise<Container> {
+  const hasher = createScryptPasswordHasher();
+  const tokens = createJwtTokenService({
+    secret: auth.secret,
+    issuer: auth.issuer,
+    audience: auth.audience,
+    ttlSeconds: auth.ttlSeconds,
+  });
   const metrics = createMetrics();
   const healthChecks: HealthCheck[] = [];
   const shutdown: (() => Promise<void>)[] = [];
@@ -7846,6 +9320,10 @@ export async function buildContainer({
   let rateLimiter: RateLimiter = createInMemoryRateLimiter({
     limit: rateLimit.max,
     windowSeconds: rateLimit.windowSeconds,
+  });
+  let authRateLimiter: RateLimiter = createInMemoryRateLimiter({
+    limit: auth.rateLimit.max,
+    windowSeconds: auth.rateLimit.windowSeconds,
   });
   let events: EventPublisher = createConsoleEventPublisher();
   let kafkaPublisher: KafkaEventPublisher | null = null;
@@ -7868,6 +9346,10 @@ export async function buildContainer({
     rateLimiter = createRedisRateLimiter(connection.client, {
       limit: rateLimit.max,
       windowSeconds: rateLimit.windowSeconds,
+    });
+    authRateLimiter = createRedisRateLimiter(connection.client, {
+      limit: auth.rateLimit.max,
+      windowSeconds: auth.rateLimit.windowSeconds,
     });
 
     healthChecks.push({ name: "redis", check: () => connection.check() });
@@ -7918,7 +9400,11 @@ export async function buildContainer({
           idempotency,
         };
 
-  const wired = buildUseCases(ports);
+  const wired = buildUseCases(
+    ports,
+    { hasher, tokens },
+    { bootstrapAdminEmails: auth.bootstrapAdminEmails },
+  );
 
   // Metrics wrap outcomes, not layers: the use cases stay unaware of them.
   const useCases: UseCases = {
@@ -7961,8 +9447,10 @@ export async function buildContainer({
   return {
     useCases,
     controllers: buildControllers(useCases),
+    tokens,
     metrics,
     rateLimiter,
+    authRateLimiter,
     healthChecks,
 
     async start() {
@@ -8007,8 +9495,86 @@ export async function buildContainer({
     },
   };
 }
-````
 
+````
+````ecommerce-backend/src/main/grant-admin.ts
+import { assignRole } from "../domain/auth/account.js";
+import { loadConfig } from "../infrastructure/config/config.js";
+import { buildPrismaPersistence } from "../infrastructure/persistence/prisma/prisma-dependencies.js";
+
+/**
+ * Roles are never self-assigned, and there is no public endpoint that can
+ * create one. Elevation is an auditable operator action:
+ *
+ *   npm run admin:grant -- ada@example.com
+ *   # in a deployed image:
+ *   node dist/main/grant-admin.js ada@example.com
+ */
+async function main(): Promise<void> {
+  const email = process.argv[2]?.trim().toLowerCase();
+
+  if (email === undefined || email.length === 0) {
+    console.error("Usage: npm run admin:grant -- <email>");
+    process.exitCode = 1;
+    return;
+  }
+
+  const config = loadConfig();
+
+  if (!config.ok) {
+    console.error(config.error.message);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (config.value.databaseUrl === null) {
+    console.error("DATABASE_URL is required to change a role");
+    process.exitCode = 1;
+    return;
+  }
+
+  const persistence = await buildPrismaPersistence({
+    url: config.value.databaseUrl,
+  });
+
+  try {
+    const customer = await persistence.customers.findByEmail(email);
+
+    if (customer === null) {
+      console.error(`No customer is registered with ${email}`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const account = await persistence.accounts.findByCustomerId(customer.id);
+
+    if (account === null) {
+      console.error(`${email} has no credential record`);
+      process.exitCode = 1;
+      return;
+    }
+
+    const updated = assignRole(account, "admin", new Date().toISOString());
+
+    if (!updated.ok) {
+      console.error(updated.error.message);
+      process.exitCode = 1;
+      return;
+    }
+
+    await persistence.accounts.save(updated.value);
+    console.log(`Granted admin to ${email} (${customer.id})`);
+    console.log(
+      "Existing access tokens keep their old role until they expire.",
+    );
+  } finally {
+    await persistence.close();
+  }
+}
+
+await main();
+
+````
 ````ecommerce-backend/src/main/server.ts
 import type { FastifyInstance } from "fastify";
 import { loadConfig } from "../infrastructure/config/config.js";
@@ -8068,6 +9634,14 @@ async function start(): Promise<void> {
               consumerGroup: config.value.kafkaConsumerGroup,
             },
       rateLimit: config.value.rateLimit,
+      auth: {
+        secret: config.value.auth.jwtSecret,
+        issuer: config.value.auth.jwtIssuer,
+        audience: config.value.auth.jwtAudience,
+        ttlSeconds: config.value.auth.accessTokenTtlSeconds,
+        rateLimit: config.value.auth.rateLimit,
+        bootstrapAdminEmails: config.value.auth.bootstrapAdminEmails,
+      },
     });
   } catch (error) {
     console.error(
@@ -8087,7 +9661,9 @@ async function start(): Promise<void> {
 
   const app = buildHttpApp({
     controllers,
+    tokens: container.tokens,
     rateLimiter: container.rateLimiter,
+    authRateLimiter: container.authRateLimiter,
     metrics: container.metrics,
     healthChecks: container.healthChecks,
   });
@@ -8098,6 +9674,9 @@ async function start(): Promise<void> {
       cache: config.value.redisUrl === null ? "memory" : "redis",
       events: config.value.kafkaBrokers === null ? "stdout" : "kafka",
       rateLimit: config.value.rateLimit,
+      auth: config.value.auth.usingDevelopmentSecret
+        ? "development-secret"
+        : "configured-secret",
     },
     "Adapters selected",
   );
@@ -8118,8 +9697,8 @@ async function start(): Promise<void> {
 }
 
 await start();
-````
 
+````
 ````ecommerce-backend/tests/architecture/dependency-rules.test.ts
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
@@ -8139,6 +9718,7 @@ const FRAMEWORKS = [
   "@prisma/client",
   "ioredis",
   "kafkajs",
+  "jose",
   "@aws-sdk/",
   "stripe",
 ];
@@ -8246,17 +9826,26 @@ describe("dependency rule", () => {
     expect(forbidden(layer("domain"), ["infrastructure"])).toEqual([]);
   });
 });
-````
 
-````ecommerce-backend/tests/e2e/http/checkout-flow.test.ts
+````
+````ecommerce-backend/tests/e2e/http/auth-flow.test.ts
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createTestHttpApp } from "../../support/test-environment.js";
+import { assignRole } from "../../../src/domain/auth/account.js";
+import {
+  createTestHttpApp,
+  FIXED_NOW,
+  TEST_PASSWORD,
+  type TestEnvironment,
+} from "../../support/test-environment.js";
 
 let app: FastifyInstance;
+let environment: TestEnvironment;
 
 beforeEach(async () => {
-  app = createTestHttpApp().app;
+  const created = createTestHttpApp();
+  app = created.app;
+  environment = created.environment;
   await app.ready();
 });
 
@@ -8264,40 +9853,313 @@ afterEach(async () => {
   await app.close();
 });
 
-async function createCustomer() {
+type AuthBody = {
+  customer: { id: string; email: string };
+  role: string;
+  accessToken: { token: string; tokenType: string; expiresAt: string };
+};
+
+async function register(
+  email = "ada@example.com",
+  name = "Ada",
+): Promise<AuthBody> {
   const response = await app.inject({
     method: "POST",
-    url: "/customers",
-    payload: { email: "Ada@example.com", name: "Ada" },
+    url: "/auth/register",
+    payload: { email, name, password: TEST_PASSWORD },
   });
 
   expect(response.statusCode).toBe(201);
-  return response.json<{ id: string }>();
+  return response.json<AuthBody>();
 }
 
-async function createProduct(availableQuantity: number) {
+async function login(email: string, password = TEST_PASSWORD) {
+  return app.inject({
+    method: "POST",
+    url: "/auth/login",
+    payload: { email, password },
+  });
+}
+
+function bearer(token: string) {
+  return { authorization: `Bearer ${token}` };
+}
+
+async function promoteToAdmin(email: string): Promise<void> {
+  const customer = await environment.repositories.customers.findByEmail(email);
+
+  if (customer === null) throw new Error("Expected a registered customer");
+
+  const account = await environment.repositories.accounts.findByCustomerId(
+    customer.id,
+  );
+
+  if (account === null) throw new Error("Expected an account");
+
+  const promoted = assignRole(account, "admin", FIXED_NOW);
+  if (!promoted.ok) throw new Error(promoted.error.message);
+
+  await environment.repositories.accounts.save(promoted.value);
+}
+
+async function seedProduct() {
+  const result = await environment.useCases.createProduct({
+    name: "Mechanical keyboard",
+    amountInMinorUnits: 1999,
+    currency: "usd",
+    availableQuantity: 5,
+  });
+
+  if (!result.ok) throw new Error(result.error.message);
+  return result.value;
+}
+
+describe("authentication over HTTP", () => {
+  it("registers, hands back a bearer token, and resolves /auth/me", async () => {
+    const session = await register();
+
+    expect(session.customer.email).toBe("ada@example.com");
+    expect(session.role).toBe("customer");
+    expect(session.accessToken.tokenType).toBe("Bearer");
+    // The credential record must never be part of the response.
+    expect(JSON.stringify(session)).not.toContain("password");
+
+    const me = await app.inject({
+      method: "GET",
+      url: "/auth/me",
+      headers: bearer(session.accessToken.token),
+    });
+
+    expect(me.statusCode).toBe(200);
+    expect(me.json()).toMatchObject({
+      customer: { id: session.customer.id },
+      role: "customer",
+    });
+  });
+
+  it("refuses a duplicate registration with 409", async () => {
+    await register();
+
+    const duplicate = await app.inject({
+      method: "POST",
+      url: "/auth/register",
+      payload: {
+        email: "Ada@example.com",
+        name: "Ada again",
+        password: TEST_PASSWORD,
+      },
+    });
+
+    expect(duplicate.statusCode).toBe(409);
+    expect(duplicate.json()).toMatchObject({
+      message: expect.stringContaining("already exists"),
+    });
+  });
+
+  it("logs in and does not reveal which credential was wrong", async () => {
+    await register();
+
+    const success = await login("Ada@Example.com");
+    expect(success.statusCode).toBe(200);
+    expect(success.json<AuthBody>().accessToken.token.length).toBeGreaterThan(
+      0,
+    );
+
+    const wrongPassword = await login("ada@example.com", "wrong password");
+    const unknownAddress = await login("nobody@example.com");
+
+    expect(wrongPassword.statusCode).toBe(401);
+    expect(unknownAddress.statusCode).toBe(401);
+    expect(wrongPassword.json()).toEqual(unknownAddress.json());
+  });
+
+  it("requires a valid bearer token for protected routes", async () => {
+    const anonymous = await app.inject({ method: "GET", url: "/auth/me" });
+
+    expect(anonymous.statusCode).toBe(401);
+    expect(anonymous.headers["www-authenticate"]).toContain("Bearer");
+
+    const forged = await app.inject({
+      method: "GET",
+      url: "/auth/me",
+      headers: bearer("forged.token.value"),
+    });
+    expect(forged.statusCode).toBe(401);
+
+    const customer = await register();
+    const cart = await app.inject({
+      method: "GET",
+      url: `/customers/${customer.customer.id}/cart`,
+      headers: bearer(customer.accessToken.token),
+    });
+    expect(cart.statusCode).toBe(404);
+  });
+
+  it("lets only administrators write to the catalogue", async () => {
+    const customer = await register();
+
+    const refused = await app.inject({
+      method: "POST",
+      url: "/products",
+      headers: bearer(customer.accessToken.token),
+      payload: {
+        name: "Mechanical keyboard",
+        price: { amountInMinorUnits: 1999, currency: "usd" },
+      },
+    });
+
+    expect(refused.statusCode).toBe(403);
+
+    await promoteToAdmin("ada@example.com");
+    const promoted = await login("ada@example.com");
+    const body = promoted.json<AuthBody>();
+
+    expect(body.role).toBe("admin");
+
+    const allowed = await app.inject({
+      method: "POST",
+      url: "/products",
+      headers: bearer(body.accessToken.token),
+      payload: {
+        name: "Mechanical keyboard",
+        price: { amountInMinorUnits: 1999, currency: "usd" },
+        availableQuantity: 5,
+      },
+    });
+
+    expect(allowed.statusCode).toBe(201);
+  });
+
+  it("keeps carts, checkout, and orders private", async () => {
+    const ada = await register("ada@example.com", "Ada");
+    const grace = await register("grace@example.com", "Grace");
+    const product = await seedProduct();
+
+    const added = await app.inject({
+      method: "POST",
+      url: `/customers/${ada.customer.id}/cart/items`,
+      headers: bearer(ada.accessToken.token),
+      payload: { productId: product.id, quantity: 1 },
+    });
+    expect(added.statusCode).toBe(200);
+
+    const readOtherCart = await app.inject({
+      method: "GET",
+      url: `/customers/${ada.customer.id}/cart`,
+      headers: bearer(grace.accessToken.token),
+    });
+    expect(readOtherCart.statusCode).toBe(403);
+
+    const checkoutAsOther = await app.inject({
+      method: "POST",
+      url: "/checkout",
+      headers: bearer(grace.accessToken.token),
+      payload: { customerId: ada.customer.id },
+    });
+    expect(checkoutAsOther.statusCode).toBe(403);
+
+    const checkedOut = await app.inject({
+      method: "POST",
+      url: "/checkout",
+      headers: bearer(ada.accessToken.token),
+      payload: { customerId: ada.customer.id },
+    });
+    expect(checkedOut.statusCode).toBe(201);
+
+    const order = checkedOut.json<{ order: { id: string } }>();
+
+    const readOtherOrder = await app.inject({
+      method: "GET",
+      url: `/orders/${order.order.id}`,
+      headers: bearer(grace.accessToken.token),
+    });
+    expect(readOtherOrder.statusCode).toBe(403);
+
+    const ownOrder = await app.inject({
+      method: "GET",
+      url: `/orders/${order.order.id}`,
+      headers: bearer(ada.accessToken.token),
+    });
+    expect(ownOrder.statusCode).toBe(200);
+  });
+});
+
+````
+````ecommerce-backend/tests/e2e/http/checkout-flow.test.ts
+import type { FastifyInstance } from "fastify";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+  createTestHttpApp,
+  TEST_PASSWORD,
+  type TestEnvironment,
+} from "../../support/test-environment.js";
+
+let app: FastifyInstance;
+let environment: TestEnvironment;
+
+beforeEach(async () => {
+  const created = createTestHttpApp();
+  app = created.app;
+  environment = created.environment;
+  await app.ready();
+});
+
+afterEach(async () => {
+  await app.close();
+});
+
+type Session = { id: string; token: string };
+
+async function registerCustomer(email = "Ada@example.com"): Promise<Session> {
   const response = await app.inject({
     method: "POST",
-    url: "/products",
-    payload: {
-      name: "Mechanical keyboard",
-      price: { amountInMinorUnits: 1999, currency: "usd" },
-      availableQuantity,
-    },
+    url: "/auth/register",
+    payload: { email, name: "Ada", password: TEST_PASSWORD },
   });
 
   expect(response.statusCode).toBe(201);
-  return response.json<{ id: string }>();
+
+  const body = response.json<{
+    customer: { id: string };
+    accessToken: { token: string };
+  }>();
+
+  return { id: body.customer.id, token: body.accessToken.token };
+}
+
+function auth(session: Session) {
+  return { authorization: `Bearer ${session.token}` };
+}
+
+/**
+ * Product creation is an admin action, so the flow seeds the catalogue through
+ * the use case instead of the API. The admin route itself is covered by
+ * `auth-flow.test.ts`.
+ */
+async function createProduct(availableQuantity: number) {
+  const result = await environment.useCases.createProduct({
+    name: "Mechanical keyboard",
+    amountInMinorUnits: 1999,
+    currency: "usd",
+    availableQuantity,
+  });
+
+  if (!result.ok) {
+    throw new Error(result.error.message);
+  }
+
+  return result.value;
 }
 
 describe("http checkout flow", () => {
   it("runs customer to paid order through the API", async () => {
-    const customer = await createCustomer();
+    const customer = await registerCustomer();
     const product = await createProduct(5);
 
     const added = await app.inject({
       method: "POST",
       url: `/customers/${customer.id}/cart/items`,
+      headers: auth(customer),
       payload: { productId: product.id, quantity: 2 },
     });
 
@@ -8306,6 +10168,7 @@ describe("http checkout flow", () => {
     const cart = await app.inject({
       method: "GET",
       url: `/customers/${customer.id}/cart`,
+      headers: auth(customer),
     });
 
     expect(cart.statusCode).toBe(200);
@@ -8317,6 +10180,7 @@ describe("http checkout flow", () => {
     const checkout = await app.inject({
       method: "POST",
       url: "/checkout",
+      headers: auth(customer),
       payload: { customerId: customer.id },
     });
 
@@ -8335,6 +10199,7 @@ describe("http checkout flow", () => {
     const order = await app.inject({
       method: "GET",
       url: `/orders/${body.order.id}`,
+      headers: auth(customer),
     });
 
     expect(order.statusCode).toBe(200);
@@ -8342,20 +10207,21 @@ describe("http checkout flow", () => {
   });
 
   it("replays a checkout that carries an Idempotency-Key", async () => {
-    const customer = await createCustomer();
+    const customer = await registerCustomer();
     const product = await createProduct(5);
 
     await app.inject({
       method: "POST",
       url: `/customers/${customer.id}/cart/items`,
+      headers: auth(customer),
       payload: { productId: product.id, quantity: 2 },
     });
 
     const first = await app.inject({
       method: "POST",
       url: "/checkout",
+      headers: { ...auth(customer), "idempotency-key": "order-42" },
       payload: { customerId: customer.id },
-      headers: { "idempotency-key": "order-42" },
     });
 
     expect(first.statusCode).toBe(201);
@@ -8367,8 +10233,8 @@ describe("http checkout flow", () => {
     const second = await app.inject({
       method: "POST",
       url: "/checkout",
+      headers: { ...auth(customer), "idempotency-key": "order-42" },
       payload: { customerId: customer.id },
-      headers: { "idempotency-key": "order-42" },
     });
 
     expect(second.statusCode).toBe(200);
@@ -8381,25 +10247,26 @@ describe("http checkout flow", () => {
   });
 
   it("rejects a blank Idempotency-Key", async () => {
-    const customer = await createCustomer();
+    const customer = await registerCustomer();
 
     const response = await app.inject({
       method: "POST",
       url: "/checkout",
+      headers: { ...auth(customer), "idempotency-key": "   " },
       payload: { customerId: customer.id },
-      headers: { "idempotency-key": "   " },
     });
 
     expect(response.statusCode).toBe(400);
   });
 
   it("returns 409 when the cart asks for more than the stock", async () => {
-    const customer = await createCustomer();
+    const customer = await registerCustomer();
     const product = await createProduct(1);
 
     const added = await app.inject({
       method: "POST",
       url: `/customers/${customer.id}/cart/items`,
+      headers: auth(customer),
       payload: { productId: product.id, quantity: 2 },
     });
 
@@ -8409,8 +10276,14 @@ describe("http checkout flow", () => {
     });
   });
 
-  it("returns 404 for an unknown order and 400 for a malformed body", async () => {
-    const missing = await app.inject({ method: "GET", url: "/orders/nope" });
+  it("returns 404 for an unknown order, 400 for malformed input, and 401 without a token", async () => {
+    const customer = await registerCustomer();
+
+    const missing = await app.inject({
+      method: "GET",
+      url: "/orders/nope",
+      headers: auth(customer),
+    });
     expect(missing.statusCode).toBe(404);
 
     const malformed = await app.inject({
@@ -8418,11 +10291,18 @@ describe("http checkout flow", () => {
       url: "/products",
       payload: { name: "No price" },
     });
-    expect(malformed.statusCode).toBe(400);
+    // The route is admin-only, so the unauthenticated caller is refused first.
+    expect(malformed.statusCode).toBe(401);
+
+    const anonymous = await app.inject({
+      method: "GET",
+      url: `/customers/${customer.id}/cart`,
+    });
+    expect(anonymous.statusCode).toBe(401);
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/e2e/http/platform-endpoints.test.ts
 import type { FastifyInstance } from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8430,7 +10310,10 @@ import type { HealthCheck } from "../../../src/infrastructure/health/health-chec
 import { buildHttpApp } from "../../../src/infrastructure/http/fastify.js";
 import { createMetrics } from "../../../src/infrastructure/observability/metrics.js";
 import { createInMemoryRateLimiter } from "../../../src/infrastructure/rate-limit/in-memory-rate-limiter.js";
-import { createTestEnvironment } from "../../support/test-environment.js";
+import {
+  createTestAuth,
+  createTestEnvironment,
+} from "../../support/test-environment.js";
 
 let app: FastifyInstance | null = null;
 
@@ -8451,6 +10334,7 @@ describe("platform endpoints", () => {
   it("reports readiness as ok when every dependency answers", async () => {
     app = buildHttpApp({
       controllers: createTestEnvironment().controllers,
+      tokens: createTestAuth().tokens,
       logger: false,
       healthChecks: [healthy],
     });
@@ -8468,6 +10352,7 @@ describe("platform endpoints", () => {
   it("returns 503 when a dependency is down", async () => {
     app = buildHttpApp({
       controllers: createTestEnvironment().controllers,
+      tokens: createTestAuth().tokens,
       logger: false,
       healthChecks: [healthy, broken],
     });
@@ -8487,6 +10372,7 @@ describe("platform endpoints", () => {
 
     app = buildHttpApp({
       controllers: createTestEnvironment().controllers,
+      tokens: createTestAuth().tokens,
       logger: false,
       metrics,
     });
@@ -8506,6 +10392,7 @@ describe("platform endpoints", () => {
   it("echoes a caller-supplied request id", async () => {
     app = buildHttpApp({
       controllers: createTestEnvironment().controllers,
+      tokens: createTestAuth().tokens,
       logger: false,
     });
     await app.ready();
@@ -8523,6 +10410,7 @@ describe("platform endpoints", () => {
   it("limits callers, exempts health routes, and returns Retry-After", async () => {
     app = buildHttpApp({
       controllers: createTestEnvironment().controllers,
+      tokens: createTestAuth().tokens,
       logger: false,
       rateLimiter: createInMemoryRateLimiter({ limit: 2, windowSeconds: 60 }),
     });
@@ -8544,8 +10432,8 @@ describe("platform endpoints", () => {
     expect(third.json()).toEqual({ message: "Too many requests" });
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/integration/prisma/prisma-persistence.test.ts
 import { PrismaClient } from "@prisma/client";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
@@ -8557,6 +10445,10 @@ import {
   buildInMemoryDependencies,
   buildUseCases,
 } from "../../../src/main/container.js";
+import {
+  createTestAuth,
+  TEST_PASSWORD,
+} from "../../support/test-environment.js";
 
 const DATABASE_URL = process.env.DATABASE_TEST_URL;
 
@@ -8570,23 +10462,27 @@ function createEnvironment(persistence: PersistenceDependencies) {
   const published: DomainEvent[] = [];
   let sequence = 0;
 
-  const useCases = buildUseCases({
-    ...base,
-    customers: persistence.customers,
-    products: persistence.products,
-    inventory: persistence.inventory,
-    carts: persistence.carts,
-    orders: persistence.orders,
-    outbox: persistence.outbox,
-    unitOfWork: persistence.unitOfWork,
-    clock: { now: () => FIXED_NOW },
-    ids: { nextId: () => `it-${(sequence += 1)}` },
-    events: {
-      async publish(event) {
-        published.push(event);
+  const useCases = buildUseCases(
+    {
+      ...base,
+      customers: persistence.customers,
+      accounts: persistence.accounts,
+      products: persistence.products,
+      inventory: persistence.inventory,
+      carts: persistence.carts,
+      orders: persistence.orders,
+      outbox: persistence.outbox,
+      unitOfWork: persistence.unitOfWork,
+      clock: { now: () => FIXED_NOW },
+      ids: { nextId: () => `it-${(sequence += 1)}` },
+      events: {
+        async publish(event) {
+          published.push(event);
+        },
       },
     },
-  });
+    createTestAuth(),
+  );
 
   return { useCases, published };
 }
@@ -8610,16 +10506,17 @@ suite("PostgreSQL persistence", () => {
 
   beforeEach(async () => {
     await admin.$executeRawUnsafe(
-      'TRUNCATE "Order", "Cart", "InventoryItem", "Product", "Customer", "OutboxMessage", "ProcessedEvent" CASCADE',
+      'TRUNCATE "Account", "Order", "Cart", "InventoryItem", "Product", "Customer", "OutboxMessage", "ProcessedEvent" CASCADE',
     );
   });
 
   async function seed(
     useCases: ReturnType<typeof createEnvironment>["useCases"],
   ) {
-    const customer = await useCases.createCustomer({
+    const customer = await useCases.register({
       email: "Ada@example.com",
       name: "Ada",
+      password: TEST_PASSWORD,
     });
     if (!customer.ok) throw new Error("Expected a customer");
 
@@ -8631,7 +10528,7 @@ suite("PostgreSQL persistence", () => {
     });
     if (!product.ok) throw new Error("Expected a product");
 
-    return { customer: customer.value, product: product.value };
+    return { customer: customer.value.customer, product: product.value };
   }
 
   it("commits a checkout across every table", async () => {
@@ -8712,9 +10609,10 @@ suite("PostgreSQL persistence", () => {
 
   it("persists backoff and dead-letters instead of retrying forever", async () => {
     const { useCases } = createEnvironment(persistence);
-    await useCases.createCustomer({
+    await useCases.register({
       email: "linus@example.com",
       name: "Linus",
+      password: TEST_PASSWORD,
     });
 
     let now = FIXED_NOW;
@@ -8766,8 +10664,8 @@ suite("PostgreSQL persistence", () => {
     expect(await persistence.inbox.hasProcessed("evt-2")).toBe(false);
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/integration/redis/redis-adapters.test.ts
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createRedisCache } from "../../../src/infrastructure/redis/redis-cache.js";
@@ -8843,26 +10741,35 @@ describe.skipIf(URL === undefined)("redis adapters", () => {
     expect(blocked.resetInSeconds).toBeGreaterThan(0);
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/support/test-environment.ts
 import type { Clock } from "../../src/application/ports/clock.js";
 import type { EventPublisher } from "../../src/application/ports/event-publisher.js";
 import type { IdGenerator } from "../../src/application/ports/id-generator.js";
 import type { DomainEvent } from "../../src/domain/shared/domain-event.js";
+import { createJwtTokenService } from "../../src/infrastructure/auth/jwt-token-service.js";
+import { createScryptPasswordHasher } from "../../src/infrastructure/auth/scrypt-password-hasher.js";
 import { buildHttpApp } from "../../src/infrastructure/http/fastify.js";
 import { createInMemoryPaymentGateway } from "../../src/infrastructure/payments/in-memory-payment-gateway.js";
 import {
   buildControllers,
   buildInMemoryDependencies,
   buildUseCases,
+  type AuthDependencies,
   type UseCases,
 } from "../../src/main/container.js";
 
 export const FIXED_NOW = "2026-01-01T00:00:00.000Z";
 
+/** Meets the domain's 12-character floor without being a real credential. */
+export const TEST_PASSWORD = "correct horse battery staple";
+
+const TEST_JWT_SECRET = "test-only-secret-that-is-long-enough-32";
+
 type TestEnvironmentOptions = {
   declinePayments?: boolean;
+  bootstrapAdminEmails?: readonly string[];
 };
 
 export type TestEnvironment = {
@@ -8872,9 +10779,44 @@ export type TestEnvironment = {
   published: DomainEvent[];
   useCases: UseCases;
   controllers: ReturnType<typeof buildControllers>;
+  auth: AuthDependencies;
   /** Drains pending outbox messages, as the background worker would. */
   drainOutbox: () => Promise<void>;
 };
+
+/**
+ * Real auth adapters, with a scrypt cost low enough for a test suite. The
+ * verification path, the token format, and the claims are the production ones.
+ */
+export function createTestAuth(): AuthDependencies {
+  return {
+    hasher: createScryptPasswordHasher({ cost: { n: 1_024 } }),
+    tokens: createJwtTokenService({
+      secret: TEST_JWT_SECRET,
+      issuer: "ecommerce-backend",
+      audience: "ecommerce-api",
+      ttlSeconds: 900,
+    }),
+  };
+}
+
+/** Registers through the real use case and returns the customer profile. */
+export async function registerTestCustomer(
+  environment: TestEnvironment,
+  input: { email?: string; name?: string } = {},
+) {
+  const result = await environment.useCases.register({
+    email: input.email ?? "ada@example.com",
+    name: input.name ?? "Ada",
+    password: TEST_PASSWORD,
+  });
+
+  if (!result.ok) {
+    throw new Error(`Expected a registration: ${result.error.message}`);
+  }
+
+  return result.value.customer;
+}
 
 /**
  * Reuses the production wiring and overrides only the ports that tests care
@@ -8885,6 +10827,7 @@ export function createTestEnvironment(
   options: TestEnvironmentOptions = {},
 ): TestEnvironment {
   const repositories = buildInMemoryDependencies();
+  const auth = createTestAuth();
 
   const clock: Clock = { now: () => FIXED_NOW };
   let sequence = 0;
@@ -8901,19 +10844,24 @@ export function createTestEnvironment(
     options.declinePayments === true ? { declineWhen: () => true } : {},
   );
 
-  const useCases = buildUseCases({
-    ...repositories,
-    clock,
-    ids,
-    events,
-    gateway,
-  });
+  const useCases = buildUseCases(
+    {
+      ...repositories,
+      clock,
+      ids,
+      events,
+      gateway,
+    },
+    auth,
+    { bootstrapAdminEmails: options.bootstrapAdminEmails ?? [] },
+  );
 
   return {
     repositories,
     published,
     useCases,
     controllers: buildControllers(useCases),
+    auth,
     async drainOutbox() {
       const result = await useCases.dispatchOutbox();
 
@@ -8928,22 +10876,242 @@ export function createTestHttpApp(options: TestEnvironmentOptions = {}) {
   const environment = createTestEnvironment(options);
 
   return {
-    app: buildHttpApp({ controllers: environment.controllers, logger: false }),
+    app: buildHttpApp({
+      controllers: environment.controllers,
+      logger: false,
+      tokens: environment.auth.tokens,
+    }),
     environment,
   };
 }
-````
 
+````
+````ecommerce-backend/tests/unit/application/auth.test.ts
+import { describe, expect, it } from "vitest";
+import { assignRole } from "../../../src/domain/auth/account.js";
+import {
+  createTestEnvironment,
+  FIXED_NOW,
+  registerTestCustomer,
+  TEST_PASSWORD,
+} from "../../support/test-environment.js";
+
+describe("registration", () => {
+  it("creates the profile and the credential, then issues a token", async () => {
+    const environment = createTestEnvironment();
+
+    const result = await environment.useCases.register({
+      email: "Ada@Example.com",
+      name: "Ada",
+      password: TEST_PASSWORD,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+
+    // The address is normalised, so casing cannot create a second account.
+    expect(result.value.customer.email).toBe("ada@example.com");
+    expect(result.value.role).toBe("customer");
+
+    const account = await environment.repositories.accounts.findByCustomerId(
+      result.value.customer.id,
+    );
+
+    expect(account?.role).toBe("customer");
+    expect(account?.passwordHash).not.toContain(TEST_PASSWORD);
+    expect(account?.passwordHash.startsWith("scrypt$")).toBe(true);
+
+    const principal = await environment.auth.tokens.verify(
+      result.value.accessToken.token,
+    );
+
+    expect(principal).toEqual({
+      customerId: result.value.customer.id,
+      email: "ada@example.com",
+      role: "customer",
+    });
+  });
+
+  it("stages customer.registered in the same transaction", async () => {
+    const environment = createTestEnvironment();
+
+    await registerTestCustomer(environment, { email: "linus@example.com" });
+
+    const pending = await environment.repositories.outbox.findPending(
+      10,
+      FIXED_NOW,
+    );
+
+    expect(pending.map((message) => message.event.name)).toEqual([
+      "customer.registered",
+    ]);
+  });
+
+  it("refuses a duplicate address and leaves no second record", async () => {
+    const environment = createTestEnvironment();
+    await registerTestCustomer(environment, { email: "ada@example.com" });
+
+    const duplicate = await environment.useCases.register({
+      email: "ADA@example.com",
+      name: "Ada again",
+      password: TEST_PASSWORD,
+    });
+
+    expect(duplicate.ok).toBe(false);
+    if (duplicate.ok) throw new Error("Expected a duplicate rejection");
+    expect(duplicate.error.type).toBe("email_already_registered");
+
+    // Neither the customer nor the credential was written.
+    expect(
+      await environment.repositories.customers.findByEmail("ada@example.com"),
+    ).not.toBeNull();
+    const all = await Promise.all(
+      ["id-1", "id-2", "id-3", "id-4"].map((id) =>
+        environment.repositories.accounts.findByCustomerId(id),
+      ),
+    );
+    expect(all.filter((account) => account !== null)).toHaveLength(1);
+  });
+
+  it("grants admin only to an address the operator listed for bootstrap", async () => {
+    const environment = createTestEnvironment({
+      bootstrapAdminEmails: ["owner@example.com"],
+    });
+
+    const owner = await environment.useCases.register({
+      email: "Owner@Example.com",
+      name: "Owner",
+      password: TEST_PASSWORD,
+    });
+    const shopper = await environment.useCases.register({
+      email: "shopper@example.com",
+      name: "Shopper",
+      password: TEST_PASSWORD,
+    });
+
+    expect(owner.ok).toBe(true);
+    expect(shopper.ok).toBe(true);
+    if (!owner.ok || !shopper.ok) throw new Error("Expected registrations");
+
+    expect(owner.value.role).toBe("admin");
+    expect(shopper.value.role).toBe("customer");
+    expect(
+      await environment.auth.tokens.verify(owner.value.accessToken.token),
+    ).toMatchObject({ role: "admin" });
+  });
+
+  it("refuses a password below the policy before writing anything", async () => {
+    const environment = createTestEnvironment();
+
+    const result = await environment.useCases.register({
+      email: "ada@example.com",
+      name: "Ada",
+      password: "short",
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected a rejection");
+    expect(result.error.type).toBe("invalid_password");
+
+    expect(
+      await environment.repositories.customers.findByEmail("ada@example.com"),
+    ).toBeNull();
+    expect(
+      await environment.repositories.outbox.findPending(10, FIXED_NOW),
+    ).toEqual([]);
+  });
+});
+
+describe("login", () => {
+  it("returns a session for the right password", async () => {
+    const environment = createTestEnvironment();
+    const registered = await registerTestCustomer(environment, {
+      email: "grace@example.com",
+      name: "Grace",
+    });
+
+    const result = await environment.useCases.login({
+      email: "Grace@Example.com",
+      password: TEST_PASSWORD,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.value.customer.id).toBe(registered.id);
+    expect(result.value.role).toBe("customer");
+    expect(
+      await environment.auth.tokens.verify(result.value.accessToken.token),
+    ).toMatchObject({ customerId: registered.id, role: "customer" });
+  });
+
+  it("answers the same way for a wrong password and an unknown address", async () => {
+    const environment = createTestEnvironment();
+    await registerTestCustomer(environment, { email: "ada@example.com" });
+
+    const wrongPassword = await environment.useCases.login({
+      email: "ada@example.com",
+      password: "not the right password",
+    });
+    const unknown = await environment.useCases.login({
+      email: "nobody@example.com",
+      password: TEST_PASSWORD,
+    });
+
+    expect(wrongPassword.ok).toBe(false);
+    expect(unknown.ok).toBe(false);
+    if (wrongPassword.ok || unknown.ok) throw new Error("Expected failures");
+
+    expect(wrongPassword.error.type).toBe("invalid_credentials");
+    expect(unknown.error.type).toBe("invalid_credentials");
+    expect(wrongPassword.error.message).toBe(unknown.error.message);
+  });
+
+  it("reports the role that is current in storage, not the one at registration", async () => {
+    const environment = createTestEnvironment();
+    const registered = await registerTestCustomer(environment, {
+      email: "admin@example.com",
+    });
+
+    const account = await environment.repositories.accounts.findByCustomerId(
+      registered.id,
+    );
+    if (account === null) throw new Error("Expected an account");
+
+    const promoted = assignRole(account, "admin", FIXED_NOW);
+    if (!promoted.ok) throw new Error("Expected a promotion");
+    await environment.repositories.accounts.save(promoted.value);
+
+    const session = await environment.useCases.login({
+      email: "admin@example.com",
+      password: TEST_PASSWORD,
+    });
+
+    expect(session.ok).toBe(true);
+    if (!session.ok) throw new Error(session.error.message);
+    expect(session.value.role).toBe("admin");
+  });
+
+  it("rejects a malformed or unsigned token", async () => {
+    const environment = createTestEnvironment();
+
+    expect(await environment.auth.tokens.verify("not-a-token")).toBeNull();
+    expect(await environment.auth.tokens.verify("")).toBeNull();
+  });
+});
+
+````
 ````ecommerce-backend/tests/unit/application/checkout-concurrency.test.ts
 import { describe, expect, it } from "vitest";
-import { createTestEnvironment } from "../../support/test-environment.js";
+import {
+  createTestEnvironment,
+  registerTestCustomer,
+} from "../../support/test-environment.js";
 
 async function seed(environment: ReturnType<typeof createTestEnvironment>) {
-  const customer = await environment.useCases.createCustomer({
+  const customer = await registerTestCustomer(environment, {
     email: "concurrent@example.com",
     name: "Concurrent",
   });
-  if (!customer.ok) throw new Error("Expected a customer");
 
   const product = await environment.useCases.createProduct({
     name: "One keyboard",
@@ -8954,12 +11122,12 @@ async function seed(environment: ReturnType<typeof createTestEnvironment>) {
   if (!product.ok) throw new Error("Expected a product");
 
   await environment.useCases.addItem({
-    customerId: customer.value.id,
+    customerId: customer.id,
     productId: product.value.id,
     quantity: 1,
   });
 
-  return customer.value;
+  return customer;
 }
 
 describe("concurrent checkout", () => {
@@ -9007,19 +11175,18 @@ describe("concurrent checkout", () => {
 
   it("releases the claim when an attempt fails, so the key can be reused", async () => {
     const environment = createTestEnvironment();
-    const customer = await environment.useCases.createCustomer({
+    const customer = await registerTestCustomer(environment, {
       email: "retry@example.com",
       name: "Retry",
     });
-    if (!customer.ok) throw new Error("Expected a customer");
 
     // No cart: the attempt fails before any money or stock moves.
     const first = await environment.useCases.checkout({
-      customerId: customer.value.id,
+      customerId: customer.id,
       idempotencyKey: "retry-me",
     });
     const second = await environment.useCases.checkout({
-      customerId: customer.value.id,
+      customerId: customer.id,
       idempotencyKey: "retry-me",
     });
 
@@ -9032,20 +11199,22 @@ describe("concurrent checkout", () => {
     expect(second.error.type).toBe("cart_not_found");
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/unit/application/checkout-idempotency.test.ts
 import { describe, expect, it } from "vitest";
-import { createTestEnvironment } from "../../support/test-environment.js";
+import {
+  createTestEnvironment,
+  registerTestCustomer,
+} from "../../support/test-environment.js";
 
 async function seedCheckedOutCart(
   environment: ReturnType<typeof createTestEnvironment>,
 ) {
-  const customer = await environment.useCases.createCustomer({
+  const customer = await registerTestCustomer(environment, {
     email: "grace@example.com",
     name: "Grace",
   });
-  if (!customer.ok) throw new Error("Expected a customer");
 
   const product = await environment.useCases.createProduct({
     name: "Trackball",
@@ -9056,12 +11225,12 @@ async function seedCheckedOutCart(
   if (!product.ok) throw new Error("Expected a product");
 
   await environment.useCases.addItem({
-    customerId: customer.value.id,
+    customerId: customer.id,
     productId: product.value.id,
     quantity: 1,
   });
 
-  return { customer: customer.value, product: product.value };
+  return { customer, product: product.value };
 }
 
 describe("checkout idempotency", () => {
@@ -9114,15 +11283,14 @@ describe("checkout idempotency", () => {
   it("keys are scoped per customer, so two customers cannot collide", async () => {
     const environment = createTestEnvironment();
 
-    const ada = await environment.useCases.createCustomer({
+    const ada = await registerTestCustomer(environment, {
       email: "ada@example.com",
       name: "Ada",
     });
-    const grace = await environment.useCases.createCustomer({
+    const grace = await registerTestCustomer(environment, {
       email: "grace@example.com",
       name: "Grace",
     });
-    if (!ada.ok || !grace.ok) throw new Error("Expected customers");
 
     const product = await environment.useCases.createProduct({
       name: "Trackball",
@@ -9132,7 +11300,7 @@ describe("checkout idempotency", () => {
     });
     if (!product.ok) throw new Error("Expected a product");
 
-    for (const customer of [ada.value, grace.value]) {
+    for (const customer of [ada, grace]) {
       await environment.useCases.addItem({
         customerId: customer.id,
         productId: product.value.id,
@@ -9141,11 +11309,11 @@ describe("checkout idempotency", () => {
     }
 
     const adaCheckout = await environment.useCases.checkout({
-      customerId: ada.value.id,
+      customerId: ada.id,
       idempotencyKey: "same-key",
     });
     const graceCheckout = await environment.useCases.checkout({
-      customerId: grace.value.id,
+      customerId: grace.id,
       idempotencyKey: "same-key",
     });
 
@@ -9170,25 +11338,21 @@ describe("checkout idempotency", () => {
     expect(result.value.replayed).toBe(false);
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/unit/application/checkout.test.ts
 import { describe, expect, it } from "vitest";
 import {
   createTestEnvironment,
   FIXED_NOW,
+  registerTestCustomer,
 } from "../../support/test-environment.js";
 
 async function seedCustomerAndProduct(
   environment: ReturnType<typeof createTestEnvironment>,
   availableQuantity: number,
 ) {
-  const customer = await environment.useCases.createCustomer({
-    email: "Ada@example.com",
-    name: "Ada",
-  });
-
-  if (!customer.ok) throw new Error("Expected a customer");
+  const customer = await registerTestCustomer(environment);
 
   const product = await environment.useCases.createProduct({
     name: "Mechanical keyboard",
@@ -9199,7 +11363,7 @@ async function seedCustomerAndProduct(
 
   if (!product.ok) throw new Error("Expected a product");
 
-  return { customer: customer.value, product: product.value };
+  return { customer, product: product.value };
 }
 
 function names(events: { name: string }[]): string[] {
@@ -9368,8 +11532,8 @@ describe("checkout", () => {
     expect(result.error.type).toBe("cart_not_found");
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/unit/application/outbox-backoff.test.ts
 import { describe, expect, it } from "vitest";
 import {
@@ -9396,8 +11560,8 @@ describe("outbox backoff", () => {
     expect(isDeadLettered(MAX_DELIVERY_ATTEMPTS)).toBe(true);
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/unit/application/outbox.test.ts
 import { describe, expect, it } from "vitest";
 import { dispatchOutboxUseCase } from "../../../src/application/outbox/dispatch-outbox.js";
@@ -9406,19 +11570,16 @@ import type { DomainEvent } from "../../../src/domain/shared/domain-event.js";
 import {
   createTestEnvironment,
   FIXED_NOW,
+  registerTestCustomer,
 } from "../../support/test-environment.js";
 
 async function stageCustomerEvent(
   environment: ReturnType<typeof createTestEnvironment>,
 ) {
-  const customer = await environment.useCases.createCustomer({
+  return registerTestCustomer(environment, {
     email: "linus@example.com",
     name: "Linus",
   });
-
-  if (!customer.ok) throw new Error("Expected a customer");
-
-  return customer.value;
 }
 
 function failingPublisher(): EventPublisher {
@@ -9580,8 +11741,100 @@ describe("outbox dispatcher", () => {
     expect(JSON.stringify(message)).not.toContain("kafka");
   });
 });
-````
 
+````
+````ecommerce-backend/tests/unit/domain/account.test.ts
+import { describe, expect, it } from "vitest";
+import {
+  assignRole,
+  createAccount,
+  MAX_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  validatePassword,
+  type Account,
+} from "../../../src/domain/auth/account.js";
+import type { Role } from "../../../src/domain/auth/role.js";
+
+const NOW = "2026-01-01T00:00:00.000Z";
+
+function buildAccount(): Account {
+  const result = createAccount({
+    customerId: "customer-1",
+    passwordHash: "scrypt$1024$8$1$c2FsdA$aGFzaA",
+    role: "customer",
+    createdAt: NOW,
+  });
+
+  if (!result.ok) throw new Error(result.error.message);
+  return result.value;
+}
+
+describe("password policy", () => {
+  it("accepts a passphrase at the minimum length", () => {
+    const result = validatePassword("a".repeat(MIN_PASSWORD_LENGTH));
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects a password below the minimum", () => {
+    const result = validatePassword("a".repeat(MIN_PASSWORD_LENGTH - 1));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected a rejection");
+    expect(result.error.type).toBe("invalid_password");
+    expect(result.error.message).toContain(String(MIN_PASSWORD_LENGTH));
+  });
+
+  it("rejects a password above the maximum", () => {
+    const result = validatePassword("a".repeat(MAX_PASSWORD_LENGTH + 1));
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected a rejection");
+    expect(result.error.message).toContain(String(MAX_PASSWORD_LENGTH));
+  });
+});
+
+describe("account", () => {
+  it("cannot exist without a credential hash", () => {
+    const result = createAccount({
+      customerId: "customer-1",
+      passwordHash: "   ",
+      role: "customer",
+      createdAt: NOW,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected a rejection");
+    expect(result.error.type).toBe("invalid_password");
+  });
+
+  it("starts as a customer and can be promoted", () => {
+    const account = buildAccount();
+    expect(account.role).toBe("customer");
+
+    const promoted = assignRole(account, "admin", NOW);
+
+    expect(promoted.ok).toBe(true);
+    if (!promoted.ok) throw new Error("Expected a promotion");
+    expect(promoted.value.role).toBe("admin");
+    expect(promoted.value.passwordHash).toBe(account.passwordHash);
+  });
+
+  it("rejects an unknown role even at runtime", () => {
+    const result = createAccount({
+      customerId: "customer-1",
+      passwordHash: "hash",
+      role: "root" as Role,
+      createdAt: NOW,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error("Expected a rejection");
+    expect(result.error.type).toBe("invalid_role");
+  });
+});
+
+````
 ````ecommerce-backend/tests/unit/domain/cart.test.ts
 import { describe, expect, it } from "vitest";
 import {
@@ -9723,8 +11976,8 @@ describe("cart", () => {
     expect(cartTotal(emptyCart())).toBeNull();
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/unit/domain/inventory-availability.test.ts
 import { describe, expect, it } from "vitest";
 import {
@@ -9791,8 +12044,8 @@ describe("checkAvailability", () => {
     });
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/unit/domain/inventory.test.ts
 import { describe, expect, it } from "vitest";
 import {
@@ -9870,8 +12123,8 @@ describe("inventory", () => {
     expect(result.error.type).toBe("invalid_quantity");
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/unit/domain/order.test.ts
 import { describe, expect, it } from "vitest";
 import {
@@ -9981,8 +12234,8 @@ describe("order", () => {
     expect(result.error.type).toBe("order_already_paid");
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/unit/infrastructure/idempotency-store.test.ts
 import { describe, expect, it } from "vitest";
 import { createInMemoryIdempotencyStore } from "../../../src/infrastructure/idempotency/in-memory-idempotency-store.js";
@@ -10049,8 +12302,8 @@ describe("in-memory idempotency store", () => {
     });
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/unit/infrastructure/inbox-store.test.ts
 import { describe, expect, it } from "vitest";
 import { createInMemoryInboxStore } from "../../../src/infrastructure/inbox/in-memory-inbox-store.js";
@@ -10089,8 +12342,8 @@ describe("inbox", () => {
     ).toBe(true);
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/unit/infrastructure/kafka-messages.test.ts
 import { describe, expect, it } from "vitest";
 import type { DomainEvent } from "../../../src/domain/shared/domain-event.js";
@@ -10162,8 +12415,8 @@ describe("kafka message mapping", () => {
     expect(JSON.parse(message.value)).not.toHaveProperty("topic");
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/unit/infrastructure/rate-limiter.test.ts
 import { describe, expect, it } from "vitest";
 import { createInMemoryRateLimiter } from "../../../src/infrastructure/rate-limit/in-memory-rate-limiter.js";
@@ -10213,8 +12466,8 @@ describe("in-memory rate limiter", () => {
     expect((await limiter.consume("ip")).allowed).toBe(true);
   });
 });
-````
 
+````
 ````ecommerce-backend/tests/unit/infrastructure/unit-of-work.test.ts
 import { describe, expect, it } from "vitest";
 import {
@@ -10227,6 +12480,7 @@ import { createProduct } from "../../../src/domain/product/product.js";
 import { createInMemoryStore } from "../../../src/infrastructure/persistence/in-memory/store.js";
 import { createInMemoryProductRepository } from "../../../src/infrastructure/persistence/repositories/in-memory-product-repository.js";
 import { createInMemoryUnitOfWork } from "../../../src/infrastructure/transactions/in-memory-unit-of-work.js";
+import { createTestAuth } from "../../support/test-environment.js";
 
 function sampleProduct(id: string) {
   const price = createMoney(1999, "usd");
@@ -10304,10 +12558,13 @@ describe("in-memory unit of work", () => {
       },
     };
 
-    const useCases = buildUseCases({
-      ...dependencies,
-      inventory: failingInventory,
-    });
+    const useCases = buildUseCases(
+      {
+        ...dependencies,
+        inventory: failingInventory,
+      },
+      createTestAuth(),
+    );
 
     const created = await useCases.createProduct({
       name: "Keyboard",
@@ -10326,8 +12583,8 @@ describe("in-memory unit of work", () => {
     expect(await dependencies.inventory.findByProductId("id-1")).toBeNull();
   });
 });
-````
 
+````
 ````ecommerce-backend/tsconfig.build.json
 {
   "extends": "./tsconfig.json",
@@ -10339,8 +12596,8 @@ describe("in-memory unit of work", () => {
   "include": ["src/**/*.ts"],
   "exclude": ["tests", "dist"]
 }
-````
 
+````
 ````ecommerce-backend/tsconfig.json
 {
   "compilerOptions": {
@@ -10361,8 +12618,8 @@ describe("in-memory unit of work", () => {
   },
   "include": ["src", "tests", "vitest.config.ts"]
 }
-````
 
+````
 ````ecommerce-backend/vitest.config.ts
 import { defineConfig } from "vitest/config";
 
@@ -10372,4 +12629,5 @@ export default defineConfig({
     include: ["tests/**/*.test.ts"],
   },
 });
+
 ````

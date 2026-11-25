@@ -9,6 +9,7 @@ import { createProduct } from "../../../src/domain/product/product.js";
 import { createInMemoryStore } from "../../../src/infrastructure/persistence/in-memory/store.js";
 import { createInMemoryProductRepository } from "../../../src/infrastructure/persistence/repositories/in-memory-product-repository.js";
 import { createInMemoryUnitOfWork } from "../../../src/infrastructure/transactions/in-memory-unit-of-work.js";
+import { createTestAuth } from "../../support/test-environment.js";
 
 function sampleProduct(id: string) {
   const price = createMoney(1999, "usd");
@@ -86,10 +87,13 @@ describe("in-memory unit of work", () => {
       },
     };
 
-    const useCases = buildUseCases({
-      ...dependencies,
-      inventory: failingInventory,
-    });
+    const useCases = buildUseCases(
+      {
+        ...dependencies,
+        inventory: failingInventory,
+      },
+      createTestAuth(),
+    );
 
     const created = await useCases.createProduct({
       name: "Keyboard",

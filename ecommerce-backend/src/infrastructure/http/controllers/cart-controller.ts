@@ -1,7 +1,12 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
+import {
+  canActForCustomer,
+  FORBIDDEN,
+} from "../../../application/auth/access-policy.js";
 import type { AddItem } from "../../../application/cart/add-item/add-item.types.js";
 import type { GetCart } from "../../../application/cart/get-cart/get-cart.types.js";
 import type { RemoveItem } from "../../../application/cart/remove-item/remove-item.types.js";
+import { principalOf } from "../auth-guards.js";
 import { sendApplicationError } from "../http-errors.js";
 import { toCartResponse } from "../presenters/cart-presenter.js";
 import {
@@ -30,6 +35,14 @@ export function createCartController({
         return;
       }
 
+      const principal = principalOf(request);
+
+      // A cart is private: only its owner (or an administrator) may read it.
+      if (!canActForCustomer(principal, params.data.customerId)) {
+        sendApplicationError(reply, FORBIDDEN);
+        return;
+      }
+
       const result = await getCart({ customerId: params.data.customerId });
 
       if (!result.ok) {
@@ -46,6 +59,13 @@ export function createCartController({
 
       if (!params.success || !body.success) {
         reply.code(400).send({ message: "Invalid request body" });
+        return;
+      }
+
+      const principal = principalOf(request);
+
+      if (!canActForCustomer(principal, params.data.customerId)) {
+        sendApplicationError(reply, FORBIDDEN);
         return;
       }
 
@@ -71,6 +91,13 @@ export function createCartController({
 
       if (!params.success) {
         reply.code(400).send({ message: "Invalid cart item" });
+        return;
+      }
+
+      const principal = principalOf(request);
+
+      if (!canActForCustomer(principal, params.data.customerId)) {
+        sendApplicationError(reply, FORBIDDEN);
         return;
       }
 

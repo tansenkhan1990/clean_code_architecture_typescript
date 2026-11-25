@@ -1,8 +1,14 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
+import {
+  canAccessOrder,
+  canActForCustomer,
+  FORBIDDEN,
+} from "../../../application/auth/access-policy.js";
 import type { CancelOrder } from "../../../application/order/cancel-order/cancel-order.types.js";
 import type { CreateOrder } from "../../../application/order/create-order/create-order.types.js";
 import type { GetOrder } from "../../../application/order/get-order/get-order.types.js";
 import type { ProcessPayment } from "../../../application/payment/process-payment/process-payment.types.js";
+import { principalOf } from "../auth-guards.js";
 import { sendApplicationError } from "../http-errors.js";
 import { toOrderResponse } from "../presenters/order-presenter.js";
 import { toPaymentResponse } from "../presenters/payment-presenter.js";
@@ -33,6 +39,14 @@ export function createOrderController({
         return;
       }
 
+      const principal = principalOf(request);
+
+      // Ordering on someone else's behalf is an administrator action.
+      if (!canActForCustomer(principal, body.data.customerId)) {
+        sendApplicationError(reply, FORBIDDEN);
+        return;
+      }
+
       const result = await createOrder({ customerId: body.data.customerId });
 
       if (!result.ok) {
@@ -58,6 +72,13 @@ export function createOrderController({
         return;
       }
 
+      const principal = principalOf(request);
+
+      if (!canAccessOrder(principal, result.value)) {
+        sendApplicationError(reply, FORBIDDEN);
+        return;
+      }
+
       reply.code(200).send(toOrderResponse(result.value));
     },
 
@@ -66,6 +87,20 @@ export function createOrderController({
 
       if (!params.success) {
         reply.code(400).send({ message: "Invalid order id" });
+        return;
+      }
+
+      const existing = await getOrder({ id: params.data.id });
+
+      if (!existing.ok) {
+        sendApplicationError(reply, existing.error);
+        return;
+      }
+
+      const principal = principalOf(request);
+
+      if (!canAccessOrder(principal, existing.value)) {
+        sendApplicationError(reply, FORBIDDEN);
         return;
       }
 
@@ -84,6 +119,20 @@ export function createOrderController({
 
       if (!params.success) {
         reply.code(400).send({ message: "Invalid order id" });
+        return;
+      }
+
+      const existing = await getOrder({ id: params.data.id });
+
+      if (!existing.ok) {
+        sendApplicationError(reply, existing.error);
+        return;
+      }
+
+      const principal = principalOf(request);
+
+      if (!canAccessOrder(principal, existing.value)) {
+        sendApplicationError(reply, FORBIDDEN);
         return;
       }
 

@@ -1,14 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { createTestEnvironment } from "../../support/test-environment.js";
+import {
+  createTestEnvironment,
+  registerTestCustomer,
+} from "../../support/test-environment.js";
 
 async function seedCheckedOutCart(
   environment: ReturnType<typeof createTestEnvironment>,
 ) {
-  const customer = await environment.useCases.createCustomer({
+  const customer = await registerTestCustomer(environment, {
     email: "grace@example.com",
     name: "Grace",
   });
-  if (!customer.ok) throw new Error("Expected a customer");
 
   const product = await environment.useCases.createProduct({
     name: "Trackball",
@@ -19,12 +21,12 @@ async function seedCheckedOutCart(
   if (!product.ok) throw new Error("Expected a product");
 
   await environment.useCases.addItem({
-    customerId: customer.value.id,
+    customerId: customer.id,
     productId: product.value.id,
     quantity: 1,
   });
 
-  return { customer: customer.value, product: product.value };
+  return { customer, product: product.value };
 }
 
 describe("checkout idempotency", () => {
@@ -77,15 +79,14 @@ describe("checkout idempotency", () => {
   it("keys are scoped per customer, so two customers cannot collide", async () => {
     const environment = createTestEnvironment();
 
-    const ada = await environment.useCases.createCustomer({
+    const ada = await registerTestCustomer(environment, {
       email: "ada@example.com",
       name: "Ada",
     });
-    const grace = await environment.useCases.createCustomer({
+    const grace = await registerTestCustomer(environment, {
       email: "grace@example.com",
       name: "Grace",
     });
-    if (!ada.ok || !grace.ok) throw new Error("Expected customers");
 
     const product = await environment.useCases.createProduct({
       name: "Trackball",
@@ -95,7 +96,7 @@ describe("checkout idempotency", () => {
     });
     if (!product.ok) throw new Error("Expected a product");
 
-    for (const customer of [ada.value, grace.value]) {
+    for (const customer of [ada, grace]) {
       await environment.useCases.addItem({
         customerId: customer.id,
         productId: product.value.id,
@@ -104,11 +105,11 @@ describe("checkout idempotency", () => {
     }
 
     const adaCheckout = await environment.useCases.checkout({
-      customerId: ada.value.id,
+      customerId: ada.id,
       idempotencyKey: "same-key",
     });
     const graceCheckout = await environment.useCases.checkout({
-      customerId: grace.value.id,
+      customerId: grace.id,
       idempotencyKey: "same-key",
     });
 

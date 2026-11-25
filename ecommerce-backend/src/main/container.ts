@@ -1,3 +1,7 @@
+import { loginUseCase } from "../application/auth/login/login.js";
+import type { Login } from "../application/auth/login/login.types.js";
+import { registerUseCase } from "../application/auth/register/register.js";
+import type { Register } from "../application/auth/register/register.types.js";
 import { addItemUseCase } from "../application/cart/add-item/add-item.js";
 import type { AddItem } from "../application/cart/add-item/add-item.types.js";
 import { getCartUseCase } from "../application/cart/get-cart/get-cart.js";
@@ -6,8 +10,6 @@ import { removeItemUseCase } from "../application/cart/remove-item/remove-item.j
 import type { RemoveItem } from "../application/cart/remove-item/remove-item.types.js";
 import { checkoutUseCase } from "../application/checkout/checkout.js";
 import type { Checkout } from "../application/checkout/checkout.types.js";
-import { createCustomerUseCase } from "../application/customer/create-customer/create-customer.js";
-import type { CreateCustomer } from "../application/customer/create-customer/create-customer.types.js";
 import { getCustomerUseCase } from "../application/customer/get-customer/get-customer.js";
 import type { GetCustomer } from "../application/customer/get-customer/get-customer.types.js";
 import { cancelOrderUseCase } from "../application/order/cancel-order/cancel-order.js";
@@ -24,15 +26,18 @@ import type { Cache } from "../application/ports/cache.js";
 import type { Clock } from "../application/ports/clock.js";
 import type { IdGenerator } from "../application/ports/id-generator.js";
 import type { OutboxRepository } from "../application/ports/outbox.js";
+import type { PasswordHasher } from "../application/ports/password-hasher.js";
 import type { PaymentGateway } from "../application/ports/payment-gateway.js";
 import type { EventPublisher } from "../application/ports/event-publisher.js";
 import type { IdempotencyStore } from "../application/ports/idempotency-store.js";
 import type { RateLimiter } from "../application/ports/rate-limiter.js";
+import type { AccountRepository } from "../application/ports/repositories/account-repository.js";
 import type { CartRepository } from "../application/ports/repositories/cart-repository.js";
 import type { CustomerRepository } from "../application/ports/repositories/customer-repository.js";
 import type { InventoryRepository } from "../application/ports/repositories/inventory-repository.js";
 import type { OrderRepository } from "../application/ports/repositories/order-repository.js";
 import type { ProductRepository } from "../application/ports/repositories/product-repository.js";
+import type { TokenService } from "../application/ports/token-service.js";
 import type { UnitOfWork } from "../application/ports/unit-of-work.js";
 import { createProductUseCase } from "../application/product/create-product/create-product.js";
 import type { CreateProduct } from "../application/product/create-product/create-product.types.js";
@@ -40,9 +45,12 @@ import { getProductUseCase } from "../application/product/get-product/get-produc
 import type { GetProduct } from "../application/product/get-product/get-product.types.js";
 import { listProductsUseCase } from "../application/product/list-products/list-products.js";
 import type { ListProducts } from "../application/product/list-products/list-products.types.js";
+import { createJwtTokenService } from "../infrastructure/auth/jwt-token-service.js";
+import { createScryptPasswordHasher } from "../infrastructure/auth/scrypt-password-hasher.js";
 import { createInMemoryCache } from "../infrastructure/cache/in-memory-cache.js";
 import { createConsoleEventPublisher } from "../infrastructure/events/console-event-publisher.js";
 import type { HealthCheck } from "../infrastructure/health/health-check.js";
+import { createAuthController } from "../infrastructure/http/controllers/auth-controller.js";
 import { createCartController } from "../infrastructure/http/controllers/cart-controller.js";
 import { createCheckoutController } from "../infrastructure/http/controllers/checkout-controller.js";
 import { createCustomerController } from "../infrastructure/http/controllers/customer-controller.js";
@@ -68,6 +76,7 @@ import {
 import { createInMemoryPaymentGateway } from "../infrastructure/payments/in-memory-payment-gateway.js";
 import { createInMemoryStore } from "../infrastructure/persistence/in-memory/store.js";
 import { buildPrismaPersistence } from "../infrastructure/persistence/prisma/prisma-dependencies.js";
+import { createInMemoryAccountRepository } from "../infrastructure/persistence/repositories/in-memory-account-repository.js";
 import { createInMemoryCartRepository } from "../infrastructure/persistence/repositories/in-memory-cart-repository.js";
 import { createInMemoryCustomerRepository } from "../infrastructure/persistence/repositories/in-memory-customer-repository.js";
 import { createInMemoryInventoryRepository } from "../infrastructure/persistence/repositories/in-memory-inventory-repository.js";
@@ -89,6 +98,7 @@ import { createInMemoryUnitOfWork } from "../infrastructure/transactions/in-memo
  */
 export type ContainerDependencies = {
   customers: CustomerRepository;
+  accounts: AccountRepository;
   products: ProductRepository;
   inventory: InventoryRepository;
   carts: CartRepository;
@@ -104,7 +114,8 @@ export type ContainerDependencies = {
 };
 
 export type UseCases = {
-  createCustomer: CreateCustomer;
+  register: Register;
+  login: Login;
   getCustomer: GetCustomer;
   createProduct: CreateProduct;
   getProduct: GetProduct;
@@ -131,6 +142,7 @@ export function buildInMemoryDependencies(): ContainerDependencies {
 
   return {
     customers: createInMemoryCustomerRepository(store),
+    accounts: createInMemoryAccountRepository(store),
     products: createInMemoryProductRepository(store),
     inventory: createInMemoryInventoryRepository(store),
     carts: createInMemoryCartRepository(store),
@@ -146,7 +158,16 @@ export function buildInMemoryDependencies(): ContainerDependencies {
   };
 }
 
-export function buildUseCases(dependencies: ContainerDependencies): UseCases {
+export type AuthDependencies = {
+  hasher: PasswordHasher;
+  tokens: TokenService;
+};
+
+export function buildUseCases(
+  dependencies: ContainerDependencies,
+  auth: AuthDependencies,
+  options: { bootstrapAdminEmails?: readonly string[] } = {},
+): UseCases {
   // Every use case that writes more than one row receives the same boundary.
   const transactional = {
     ids: dependencies.ids,
@@ -176,9 +197,19 @@ export function buildUseCases(dependencies: ContainerDependencies): UseCases {
   });
 
   return {
-    createCustomer: createCustomerUseCase({
+    register: registerUseCase({
       customers: dependencies.customers,
+      accounts: dependencies.accounts,
+      hasher: auth.hasher,
+      tokens: auth.tokens,
+      bootstrapAdminEmails: options.bootstrapAdminEmails ?? [],
       ...transactional,
+    }),
+    login: loginUseCase({
+      customers: dependencies.customers,
+      accounts: dependencies.accounts,
+      hasher: auth.hasher,
+      tokens: auth.tokens,
     }),
     getCustomer: getCustomerUseCase({ customers: dependencies.customers }),
     createProduct: createProductUseCase({
@@ -226,8 +257,12 @@ export function buildUseCases(dependencies: ContainerDependencies): UseCases {
 
 export function buildControllers(useCases: UseCases): HttpControllers {
   return {
+    auth: createAuthController({
+      register: useCases.register,
+      login: useCases.login,
+      getCustomer: useCases.getCustomer,
+    }),
     customers: createCustomerController({
-      createCustomer: useCases.createCustomer,
       getCustomer: useCases.getCustomer,
     }),
     products: createProductController({
@@ -262,13 +297,26 @@ export type ContainerOptions = {
     consumerGroup: string;
   } | null;
   rateLimit: { max: number; windowSeconds: number };
+  auth: {
+    secret: string;
+    issuer: string;
+    audience: string;
+    ttlSeconds: number;
+    /** Register/login get a tighter budget than the rest of the API. */
+    rateLimit: { max: number; windowSeconds: number };
+    /** Addresses that become administrators when they register. */
+    bootstrapAdminEmails: readonly string[];
+  };
 };
 
 export type Container = {
   useCases: UseCases;
   controllers: HttpControllers;
+  /** One verifier for the server; routes and tokens cannot disagree. */
+  tokens: TokenService;
   metrics: Metrics;
   rateLimiter: RateLimiter;
+  authRateLimiter: RateLimiter;
   healthChecks: HealthCheck[];
   /** Connects background consumers. Safe to call once. */
   start(): Promise<void>;
@@ -292,7 +340,15 @@ export async function buildContainer({
   redis,
   kafka,
   rateLimit,
+  auth,
 }: ContainerOptions): Promise<Container> {
+  const hasher = createScryptPasswordHasher();
+  const tokens = createJwtTokenService({
+    secret: auth.secret,
+    issuer: auth.issuer,
+    audience: auth.audience,
+    ttlSeconds: auth.ttlSeconds,
+  });
   const metrics = createMetrics();
   const healthChecks: HealthCheck[] = [];
   const shutdown: (() => Promise<void>)[] = [];
@@ -305,6 +361,10 @@ export async function buildContainer({
   let rateLimiter: RateLimiter = createInMemoryRateLimiter({
     limit: rateLimit.max,
     windowSeconds: rateLimit.windowSeconds,
+  });
+  let authRateLimiter: RateLimiter = createInMemoryRateLimiter({
+    limit: auth.rateLimit.max,
+    windowSeconds: auth.rateLimit.windowSeconds,
   });
   let events: EventPublisher = createConsoleEventPublisher();
   let kafkaPublisher: KafkaEventPublisher | null = null;
@@ -327,6 +387,10 @@ export async function buildContainer({
     rateLimiter = createRedisRateLimiter(connection.client, {
       limit: rateLimit.max,
       windowSeconds: rateLimit.windowSeconds,
+    });
+    authRateLimiter = createRedisRateLimiter(connection.client, {
+      limit: auth.rateLimit.max,
+      windowSeconds: auth.rateLimit.windowSeconds,
     });
 
     healthChecks.push({ name: "redis", check: () => connection.check() });
@@ -377,7 +441,11 @@ export async function buildContainer({
           idempotency,
         };
 
-  const wired = buildUseCases(ports);
+  const wired = buildUseCases(
+    ports,
+    { hasher, tokens },
+    { bootstrapAdminEmails: auth.bootstrapAdminEmails },
+  );
 
   // Metrics wrap outcomes, not layers: the use cases stay unaware of them.
   const useCases: UseCases = {
@@ -420,8 +488,10 @@ export async function buildContainer({
   return {
     useCases,
     controllers: buildControllers(useCases),
+    tokens,
     metrics,
     rateLimiter,
+    authRateLimiter,
     healthChecks,
 
     async start() {

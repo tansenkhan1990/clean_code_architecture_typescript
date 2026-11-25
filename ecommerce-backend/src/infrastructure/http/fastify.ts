@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyError, type FastifyInstance } from "fastify";
 import type { RateLimiter } from "../../application/ports/rate-limiter.js";
+import type { TokenService } from "../../application/ports/token-service.js";
 import type { HealthCheck } from "../health/health-check.js";
 import type { Metrics } from "../observability/metrics.js";
+import { registerAuthentication } from "./auth-guards.js";
+import type { AuthController } from "./controllers/auth-controller.js";
 import type { CartController } from "./controllers/cart-controller.js";
 import type { CheckoutController } from "./controllers/checkout-controller.js";
 import type { CustomerController } from "./controllers/customer-controller.js";
@@ -10,6 +13,7 @@ import type { OrderController } from "./controllers/order-controller.js";
 import type { ProductController } from "./controllers/product-controller.js";
 import { registerHealthRoutes } from "./health-routes.js";
 import { registerRateLimit } from "./rate-limit.js";
+import { registerAuthRoutes } from "./routes/auth-routes.js";
 import { registerCartRoutes } from "./routes/cart-routes.js";
 import { registerCheckoutRoutes } from "./routes/checkout-routes.js";
 import { registerCustomerRoutes } from "./routes/customer-routes.js";
@@ -17,6 +21,7 @@ import { registerOrderRoutes } from "./routes/order-routes.js";
 import { registerProductRoutes } from "./routes/product-routes.js";
 
 export type HttpControllers = {
+  auth: AuthController;
   customers: CustomerController;
   products: ProductController;
   carts: CartController;
@@ -26,9 +31,13 @@ export type HttpControllers = {
 
 type HttpAppOptions = {
   controllers: HttpControllers;
+  /** Verifies the bearer token that guards protected routes. */
+  tokens: TokenService;
   logger?: boolean;
   /** Omitted in tests that do not care about limiting. */
   rateLimiter?: RateLimiter;
+  /** Tighter budget for register/login; falls back to unlimited in tests. */
+  authRateLimiter?: RateLimiter;
   metrics?: Metrics;
   healthChecks?: HealthCheck[];
 };
@@ -42,8 +51,10 @@ type HttpAppOptions = {
  */
 export function buildHttpApp({
   controllers,
+  tokens,
   logger = true,
   rateLimiter,
+  authRateLimiter,
   metrics,
   healthChecks = [],
 }: HttpAppOptions): FastifyInstance {
@@ -75,16 +86,32 @@ export function buildHttpApp({
     });
   }
 
+  // Cheap, dependency-free defaults. Anything that would need a policy
+  // decision per route (CSP, CORS) is left to the deployment edge.
   app.addHook("onSend", async (request, reply, payload) => {
     reply.header("x-request-id", request.id);
+    reply.header("x-content-type-options", "nosniff");
+    reply.header("x-frame-options", "DENY");
+    reply.header("referrer-policy", "no-referrer");
+
+    // Token and profile responses must never be stored by a shared cache.
+    if (request.url.startsWith("/auth/")) {
+      reply.header("cache-control", "no-store");
+    }
+
     return payload;
   });
+
+  // Authentication is extracted once for every route; the guards decide who
+  // may continue, and public routes simply ignore a missing principal.
+  registerAuthentication(app, tokens);
 
   registerHealthRoutes(app, {
     checks: healthChecks,
     ...(metrics === undefined ? {} : { metrics }),
   });
 
+  registerAuthRoutes(app, controllers.auth, authRateLimiter);
   registerCustomerRoutes(app, controllers.customers);
   registerProductRoutes(app, controllers.products);
   registerCartRoutes(app, controllers.carts);

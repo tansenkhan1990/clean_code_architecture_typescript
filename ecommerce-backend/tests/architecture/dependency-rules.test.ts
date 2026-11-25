@@ -16,6 +16,7 @@ const FRAMEWORKS = [
   "@prisma/client",
   "ioredis",
   "kafkajs",
+  "jose",
   "@aws-sdk/",
   "stripe",
 ];

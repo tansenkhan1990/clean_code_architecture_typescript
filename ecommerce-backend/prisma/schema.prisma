@@ -15,6 +15,20 @@ model Customer {
   email     String   @unique
   name      String
   createdAt DateTime @db.Timestamptz(3)
+  account   Account?
+}
+
+// One credential record per customer. The hash is opaque here: the algorithm
+// and its parameters live inside the string, owned by the hashing adapter.
+// `role` is a closed set in the domain, and self-registration can only store
+// "customer"; elevation is an explicit operator command.
+model Account {
+  customerId   String   @id
+  passwordHash String
+  role         String   @default("customer")
+  createdAt    DateTime @db.Timestamptz(3)
+  updatedAt    DateTime @db.Timestamptz(3)
+  customer     Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
 }
 
 model Product {

@@ -4,7 +4,10 @@ import type { HealthCheck } from "../../../src/infrastructure/health/health-chec
 import { buildHttpApp } from "../../../src/infrastructure/http/fastify.js";
 import { createMetrics } from "../../../src/infrastructure/observability/metrics.js";
 import { createInMemoryRateLimiter } from "../../../src/infrastructure/rate-limit/in-memory-rate-limiter.js";
-import { createTestEnvironment } from "../../support/test-environment.js";
+import {
+  createTestAuth,
+  createTestEnvironment,
+} from "../../support/test-environment.js";
 
 let app: FastifyInstance | null = null;
 
@@ -25,6 +28,7 @@ describe("platform endpoints", () => {
   it("reports readiness as ok when every dependency answers", async () => {
     app = buildHttpApp({
       controllers: createTestEnvironment().controllers,
+      tokens: createTestAuth().tokens,
       logger: false,
       healthChecks: [healthy],
     });
@@ -42,6 +46,7 @@ describe("platform endpoints", () => {
   it("returns 503 when a dependency is down", async () => {
     app = buildHttpApp({
       controllers: createTestEnvironment().controllers,
+      tokens: createTestAuth().tokens,
       logger: false,
       healthChecks: [healthy, broken],
     });
@@ -61,6 +66,7 @@ describe("platform endpoints", () => {
 
     app = buildHttpApp({
       controllers: createTestEnvironment().controllers,
+      tokens: createTestAuth().tokens,
       logger: false,
       metrics,
     });
@@ -80,6 +86,7 @@ describe("platform endpoints", () => {
   it("echoes a caller-supplied request id", async () => {
     app = buildHttpApp({
       controllers: createTestEnvironment().controllers,
+      tokens: createTestAuth().tokens,
       logger: false,
     });
     await app.ready();
@@ -97,6 +104,7 @@ describe("platform endpoints", () => {
   it("limits callers, exempts health routes, and returns Retry-After", async () => {
     app = buildHttpApp({
       controllers: createTestEnvironment().controllers,
+      tokens: createTestAuth().tokens,
       logger: false,
       rateLimiter: createInMemoryRateLimiter({ limit: 2, windowSeconds: 60 }),
     });

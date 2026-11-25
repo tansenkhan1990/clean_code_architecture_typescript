@@ -5,6 +5,8 @@ import type { FastifyReply } from "fastify";
  * the mapping, so this table only holds the types that need a specific code.
  */
 const EXPLICIT_STATUSES: Record<string, number> = {
+  invalid_credentials: 401,
+  forbidden: 403,
   invalid_customer: 400,
   invalid_product: 400,
   invalid_inventory: 400,
@@ -25,6 +27,14 @@ const EXPLICIT_STATUSES: Record<string, number> = {
 };
 
 export function statusForError(errorType: string): number {
+  // The table wins over the suffix conventions: `invalid_credentials` is an
+  // authentication failure (401), not a malformed request (400).
+  const explicit = EXPLICIT_STATUSES[errorType];
+
+  if (explicit !== undefined) {
+    return explicit;
+  }
+
   if (errorType.endsWith("_not_found")) {
     return 404;
   }
@@ -33,7 +43,7 @@ export function statusForError(errorType: string): number {
     return 400;
   }
 
-  return EXPLICIT_STATUSES[errorType] ?? 500;
+  return 500;
 }
 
 /**

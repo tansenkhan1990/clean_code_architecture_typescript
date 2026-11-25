@@ -8,6 +8,10 @@ import {
   buildInMemoryDependencies,
   buildUseCases,
 } from "../../../src/main/container.js";
+import {
+  createTestAuth,
+  TEST_PASSWORD,
+} from "../../support/test-environment.js";
 
 const DATABASE_URL = process.env.DATABASE_TEST_URL;
 
@@ -21,23 +25,27 @@ function createEnvironment(persistence: PersistenceDependencies) {
   const published: DomainEvent[] = [];
   let sequence = 0;
 
-  const useCases = buildUseCases({
-    ...base,
-    customers: persistence.customers,
-    products: persistence.products,
-    inventory: persistence.inventory,
-    carts: persistence.carts,
-    orders: persistence.orders,
-    outbox: persistence.outbox,
-    unitOfWork: persistence.unitOfWork,
-    clock: { now: () => FIXED_NOW },
-    ids: { nextId: () => `it-${(sequence += 1)}` },
-    events: {
-      async publish(event) {
-        published.push(event);
+  const useCases = buildUseCases(
+    {
+      ...base,
+      customers: persistence.customers,
+      accounts: persistence.accounts,
+      products: persistence.products,
+      inventory: persistence.inventory,
+      carts: persistence.carts,
+      orders: persistence.orders,
+      outbox: persistence.outbox,
+      unitOfWork: persistence.unitOfWork,
+      clock: { now: () => FIXED_NOW },
+      ids: { nextId: () => `it-${(sequence += 1)}` },
+      events: {
+        async publish(event) {
+          published.push(event);
+        },
       },
     },
-  });
+    createTestAuth(),
+  );
 
   return { useCases, published };
 }
@@ -61,16 +69,17 @@ suite("PostgreSQL persistence", () => {
 
   beforeEach(async () => {
     await admin.$executeRawUnsafe(
-      'TRUNCATE "Order", "Cart", "InventoryItem", "Product", "Customer", "OutboxMessage", "ProcessedEvent" CASCADE',
+      'TRUNCATE "Account", "Order", "Cart", "InventoryItem", "Product", "Customer", "OutboxMessage", "ProcessedEvent" CASCADE',
     );
   });
 
   async function seed(
     useCases: ReturnType<typeof createEnvironment>["useCases"],
   ) {
-    const customer = await useCases.createCustomer({
+    const customer = await useCases.register({
       email: "Ada@example.com",
       name: "Ada",
+      password: TEST_PASSWORD,
     });
     if (!customer.ok) throw new Error("Expected a customer");
 
@@ -82,7 +91,7 @@ suite("PostgreSQL persistence", () => {
     });
     if (!product.ok) throw new Error("Expected a product");
 
-    return { customer: customer.value, product: product.value };
+    return { customer: customer.value.customer, product: product.value };
   }
 
   it("commits a checkout across every table", async () => {
@@ -163,9 +172,10 @@ suite("PostgreSQL persistence", () => {
 
   it("persists backoff and dead-letters instead of retrying forever", async () => {
     const { useCases } = createEnvironment(persistence);
-    await useCases.createCustomer({
+    await useCases.register({
       email: "linus@example.com",
       name: "Linus",
+      password: TEST_PASSWORD,
     });
 
     let now = FIXED_NOW;

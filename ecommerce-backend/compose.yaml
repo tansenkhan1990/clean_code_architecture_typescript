@@ -1,39 +1,21 @@
 name: ecommerce-backend
 
 services:
-  mongo:
-    image: mongo:7
-    # A single-node replica set, because MongoDB transactions require one.
-    command: ["mongod", "--replSet", "rs0", "--bind_ip_all"]
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: ecommerce
     ports:
-      - "27017:27017"
+      - "5432:5432"
     volumes:
-      - mongo-data:/data/db
+      - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test:
-        ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      test: ["CMD-SHELL", "pg_isready -U app -d ecommerce"]
       interval: 5s
       timeout: 5s
       retries: 20
-
-  mongo-init:
-    image: mongo:7
-    depends_on:
-      mongo:
-        condition: service_healthy
-    restart: "no"
-    entrypoint: ["bash", "-c"]
-    command:
-      - |
-        until mongosh --host mongo:27017 --quiet --eval "
-          try { rs.status().ok } catch (e) {
-            rs.initiate({ _id: 'rs0', members: [{ _id: 0, host: 'mongo:27017' }] })
-          }
-        " | grep -q 1; do
-          echo 'waiting for the replica set'
-          sleep 1
-        done
-        echo 'replica set ready'
 
   redis:
     image: redis:7-alpine
@@ -90,8 +72,8 @@ services:
     build:
       context: .
     depends_on:
-      mongo-init:
-        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
       redis:
         condition: service_healthy
       kafka:
@@ -99,8 +81,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: "3000"
-      MONGODB_URI: mongodb://mongo:27017/ecommerce?replicaSet=rs0
-      MONGODB_DATABASE: ecommerce
+      DATABASE_URL: postgresql://app:app@postgres:5432/ecommerce?schema=public
       REDIS_URL: redis://redis:6379
       KAFKA_BROKERS: kafka:9092
       KAFKA_CLIENT_ID: ecommerce-backend
@@ -113,5 +94,5 @@ services:
     restart: unless-stopped
 
 volumes:
-  mongo-data:
+  postgres-data:
   redis-data:

@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { createTestEnvironment } from "../../support/test-environment.js";
+import {
+  createTestEnvironment,
+  FIXED_NOW,
+} from "../../support/test-environment.js";
 
 async function seedCustomerAndProduct(
   environment: ReturnType<typeof createTestEnvironment>,
@@ -91,7 +94,10 @@ describe("checkout", () => {
     // The transaction committed the events; nothing has been delivered yet.
     expect(environment.published).toEqual([]);
 
-    const pending = await environment.repositories.outbox.findPending(10);
+    const pending = await environment.repositories.outbox.findPending(
+      10,
+      FIXED_NOW,
+    );
     expect(
       pending
         .map((message) => message.event.name)
@@ -104,7 +110,9 @@ describe("checkout", () => {
       "order.created",
       "order.paid",
     ]);
-    expect(await environment.repositories.outbox.findPending(10)).toEqual([]);
+    expect(
+      await environment.repositories.outbox.findPending(10, FIXED_NOW),
+    ).toEqual([]);
 
     // Draining twice must not redeliver.
     const delivered = environment.published.length;

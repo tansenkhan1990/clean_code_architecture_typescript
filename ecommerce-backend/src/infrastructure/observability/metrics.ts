@@ -17,7 +17,11 @@ export type Metrics = {
     durationSeconds: number;
   }): void;
   recordCheckout(outcome: CheckoutMetricOutcome): void;
-  recordOutboxDelivery(published: number, failed: number): void;
+  recordOutboxDelivery(
+    published: number,
+    failed: number,
+    deadLettered: number,
+  ): void;
   render(): Promise<string>;
   contentType: string;
 };
@@ -79,13 +83,17 @@ export function createMetrics(): Metrics {
       checkout.inc({ outcome });
     },
 
-    recordOutboxDelivery(published, failed) {
+    recordOutboxDelivery(published, failed, deadLettered) {
       if (published > 0) {
         outbox.inc({ result: "published" }, published);
       }
 
       if (failed > 0) {
         outbox.inc({ result: "failed" }, failed);
+      }
+
+      if (deadLettered > 0) {
+        outbox.inc({ result: "dead_lettered" }, deadLettered);
       }
     },
 

@@ -18,12 +18,16 @@ export function stageEvent(
   { outbox, ids, clock }: StageEventDependencies,
   event: DomainEvent,
 ): Promise<void> {
+  const now = clock.now();
+
   return outbox.add({
     id: ids.nextId(),
     event,
-    createdAt: clock.now(),
+    createdAt: now,
     publishedAt: null,
     attempts: 0,
     lastError: null,
+    nextAttemptAt: now,
+    deadLetteredAt: null,
   });
 }

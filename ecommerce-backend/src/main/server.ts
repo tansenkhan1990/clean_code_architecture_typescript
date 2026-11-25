@@ -41,13 +41,10 @@ async function start(): Promise<void> {
 
   try {
     container = await buildContainer({
-      mongodb:
-        config.value.mongodbUri === null
+      postgres:
+        config.value.databaseUrl === null
           ? null
-          : {
-              uri: config.value.mongodbUri,
-              database: config.value.mongodbDatabase,
-            },
+          : { url: config.value.databaseUrl },
       redis:
         config.value.redisUrl === null ? null : { url: config.value.redisUrl },
       kafka:
@@ -85,7 +82,8 @@ async function start(): Promise<void> {
 
   app.log.info(
     {
-      persistence: config.value.mongodbUri === null ? "memory" : "mongodb",
+      persistence:
+        config.value.databaseUrl === null ? "memory" : "postgresql",
       cache: config.value.redisUrl === null ? "memory" : "redis",
       events: config.value.kafkaBrokers === null ? "stdout" : "kafka",
       rateLimit: config.value.rateLimit,

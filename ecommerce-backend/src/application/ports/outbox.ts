@@ -15,6 +15,18 @@ export type OutboxMessage = {
   publishedAt: string | null;
   attempts: number;
   lastError: string | null;
+  /** Retry scheduling: a failed message waits before it is picked up again. */
+  nextAttemptAt: string;
+  /** Set once the attempt budget is exhausted; the message is never retried. */
+  deadLetteredAt: string | null;
+};
+
+export type OutboxFailure = {
+  error: string;
+  /** When the next attempt becomes eligible. */
+  nextAttemptAt: string;
+  /** Non-null when this failure exhausted the attempt budget. */
+  deadLetteredAt: string | null;
 };
 
 /**
@@ -23,7 +35,10 @@ export type OutboxMessage = {
  */
 export type OutboxRepository = {
   add(message: OutboxMessage): Promise<void>;
-  findPending(limit: number): Promise<OutboxMessage[]>;
+  /** Messages that are due: unpublished, not dead-lettered, past their backoff. */
+  findPending(limit: number, now: string): Promise<OutboxMessage[]>;
   markPublished(id: string, publishedAt: string): Promise<void>;
-  markFailed(id: string, error: string): Promise<void>;
+  markFailed(id: string, failure: OutboxFailure): Promise<void>;
+  /** Dead-lettered messages, for operators and tests. */
+  findDeadLettered(limit: number): Promise<OutboxMessage[]>;
 };

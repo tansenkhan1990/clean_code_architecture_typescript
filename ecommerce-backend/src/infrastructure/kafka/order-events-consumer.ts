@@ -1,4 +1,5 @@
 import { Kafka, type Consumer, type EachMessagePayload } from "kafkajs";
+import type { InboxStore } from "../../application/ports/inbox-store.js";
 import { CUSTOMER_TOPIC, ORDER_TOPIC } from "./kafka-messages.js";
 
 export type ConsumedEvent = {
@@ -13,6 +14,8 @@ export type OrderEventsConsumerOptions = {
   clientId: string;
   groupId: string;
   topics?: string[];
+  /** Durable dedupe. Without one, a restart replays recent events. */
+  inbox?: InboxStore;
   /** Where a decoded event goes. The default logs one structured line. */
   onEvent?: (event: ConsumedEvent) => Promise<void> | void;
   onError?: (error: unknown) => void;
@@ -26,19 +29,19 @@ export type OrderEventsConsumer = {
 const DEFAULT_TOPICS = [ORDER_TOPIC, CUSTOMER_TOPIC];
 
 /**
- * A consumer that is deliberately idempotent: delivery is at-least-once, so
- * the same `x-event-id` can arrive twice. Recent ids are remembered and
- * duplicates are acknowledged without being handled again.
+ * Delivery is at-least-once, so the same `x-event-id` can arrive twice. The
+ * inbox makes that harmless across restarts and across replicas: the insert is
+ * the claim, and a duplicate is acknowledged without running the handler.
  *
- * The dedupe set is per-process and bounded. A real projection would persist
- * processed ids in the same database transaction as the projection update
- * (the inbox pattern); this keeps the shape visible without pretending.
+ * A production projection would record the id in the *same transaction* as the
+ * projection update; the port allows that, and the current handler only logs.
  */
 export function createOrderEventsConsumer({
   brokers,
   clientId,
   groupId,
   topics = DEFAULT_TOPICS,
+  inbox,
   onEvent = (event) => {
     console.log(
       JSON.stringify({
@@ -55,27 +58,6 @@ export function createOrderEventsConsumer({
     groupId,
     allowAutoTopicCreation: true,
   });
-  const seen: string[] = [];
-  const seenIds = new Set<string>();
-  const MAX_SEEN = 1_000;
-
-  const remember = (id: string): boolean => {
-    if (seenIds.has(id)) {
-      return false;
-    }
-
-    seenIds.add(id);
-    seen.push(id);
-
-    if (seen.length > MAX_SEEN) {
-      const evicted = seen.shift();
-      if (evicted !== undefined) {
-        seenIds.delete(evicted);
-      }
-    }
-
-    return true;
-  };
 
   const handle = async ({ message }: EachMessagePayload): Promise<void> => {
     const headerId = message.headers?.["x-event-id"];
@@ -94,8 +76,16 @@ export function createOrderEventsConsumer({
         ? headerId
         : (headerId?.toString() ?? parsed.id);
 
-    if (!remember(id)) {
-      return;
+    if (inbox !== undefined) {
+      const firstDelivery = await inbox.markProcessed({
+        id,
+        eventName: parsed.name,
+        processedAt: new Date().toISOString(),
+      });
+
+      if (!firstDelivery) {
+        return;
+      }
     }
 
     await onEvent({ ...parsed, id });

@@ -50,6 +50,8 @@ import { createOrderController } from "../infrastructure/http/controllers/order-
 import { createProductController } from "../infrastructure/http/controllers/product-controller.js";
 import type { HttpControllers } from "../infrastructure/http/fastify.js";
 import { createInMemoryIdempotencyStore } from "../infrastructure/idempotency/in-memory-idempotency-store.js";
+import { createInMemoryInboxStore } from "../infrastructure/inbox/in-memory-inbox-store.js";
+import type { InboxStore } from "../application/ports/inbox-store.js";
 import {
   createKafkaEventPublisher,
   type KafkaEventPublisher,
@@ -65,7 +67,7 @@ import {
 } from "../infrastructure/observability/metrics.js";
 import { createInMemoryPaymentGateway } from "../infrastructure/payments/in-memory-payment-gateway.js";
 import { createInMemoryStore } from "../infrastructure/persistence/in-memory/store.js";
-import { buildMongoPersistence } from "../infrastructure/persistence/mongo/mongodb-dependencies.js";
+import { buildPrismaPersistence } from "../infrastructure/persistence/prisma/prisma-dependencies.js";
 import { createInMemoryCartRepository } from "../infrastructure/persistence/repositories/in-memory-cart-repository.js";
 import { createInMemoryCustomerRepository } from "../infrastructure/persistence/repositories/in-memory-customer-repository.js";
 import { createInMemoryInventoryRepository } from "../infrastructure/persistence/repositories/in-memory-inventory-repository.js";
@@ -250,7 +252,7 @@ export function buildControllers(useCases: UseCases): HttpControllers {
 
 export type ContainerOptions = {
   /** `null` keeps the in-memory adapters, which is the default for tests. */
-  mongodb: { uri: string; database: string } | null;
+  postgres: { url: string } | null;
   /** `null` keeps the in-memory cache, idempotency, and rate limiter. */
   redis: { url: string } | null;
   /** `null` publishes to stdout and runs no consumer. */
@@ -286,7 +288,7 @@ export type Container = {
  *   KAFKA_BROKERS→ Kafka producer behind the outbox + an idempotent consumer
  */
 export async function buildContainer({
-  mongodb,
+  postgres,
   redis,
   kafka,
   rateLimit,
@@ -295,8 +297,10 @@ export async function buildContainer({
   const healthChecks: HealthCheck[] = [];
   const shutdown: (() => Promise<void>)[] = [];
 
-  let persistence: Awaited<ReturnType<typeof buildMongoPersistence>> | null =
-    null;
+    let persistence: Awaited<
+    ReturnType<typeof buildPrismaPersistence>
+  > | null = null;
+  let inbox: InboxStore = createInMemoryInboxStore();
   let cache: Cache = createInMemoryCache();
   let idempotency: IdempotencyStore = createInMemoryIdempotencyStore();
   let rateLimiter: RateLimiter = createInMemoryRateLimiter({
@@ -307,11 +311,12 @@ export async function buildContainer({
   let kafkaPublisher: KafkaEventPublisher | null = null;
   let consumer: OrderEventsConsumer | null = null;
 
-  if (mongodb !== null) {
-    persistence = await buildMongoPersistence(mongodb);
+  if (postgres !== null) {
+    persistence = await buildPrismaPersistence(postgres);
     const connection = persistence;
+    inbox = connection.inbox;
 
-    healthChecks.push({ name: "mongodb", check: () => connection.check() });
+    healthChecks.push({ name: "postgres", check: () => connection.check() });
     shutdown.push(() => connection.close());
   }
 
@@ -340,6 +345,7 @@ export async function buildContainer({
       brokers: kafka.brokers,
       clientId: kafka.clientId,
       groupId: kafka.consumerGroup,
+      inbox,
     });
 
     healthChecks.push({
@@ -404,6 +410,7 @@ export async function buildContainer({
         metrics.recordOutboxDelivery(
           result.value.published,
           result.value.failed,
+          result.value.deadLettered,
         );
       }
 

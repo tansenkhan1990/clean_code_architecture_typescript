@@ -5,9 +5,8 @@ import { err, ok, type Result } from "../../domain/shared/result.js";
 export type Config = {
   port: number;
   nodeEnv: "development" | "test" | "production";
-  /** Set to use MongoDB; null keeps the in-memory adapters. */
-  mongodbUri: string | null;
-  mongodbDatabase: string;
+  /** Set to use PostgreSQL (Prisma); null keeps the in-memory adapters. */
+  databaseUrl: string | null;
   /** Set to use Redis for cache, idempotency, and rate limiting. */
   redisUrl: string | null;
   /** Set to publish outbox events to Kafka and run the consumer. */
@@ -38,8 +37,7 @@ const envSchema = z.object({
     .default("development"),
   // An empty value (docker compose passes one for an unset variable) means
   // "use the fallback adapter", not "connect to an empty URI".
-  MONGODB_URI: optionalString,
-  MONGODB_DATABASE: z.string().min(1).default("ecommerce"),
+  DATABASE_URL: optionalString,
   REDIS_URL: optionalString,
   KAFKA_BROKERS: optionalString,
   KAFKA_CLIENT_ID: z.string().min(1).default("ecommerce-backend"),
@@ -96,8 +94,7 @@ export function parseEnvironment(
   return ok({
     port: parsed.data.PORT,
     nodeEnv: parsed.data.NODE_ENV,
-    mongodbUri: parsed.data.MONGODB_URI ?? null,
-    mongodbDatabase: parsed.data.MONGODB_DATABASE,
+    databaseUrl: parsed.data.DATABASE_URL ?? null,
     redisUrl: parsed.data.REDIS_URL ?? null,
     kafkaBrokers: parseBrokers(parsed.data.KAFKA_BROKERS),
     kafkaClientId: parsed.data.KAFKA_CLIENT_ID,

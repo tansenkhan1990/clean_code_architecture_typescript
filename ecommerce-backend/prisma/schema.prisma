@@ -1,0 +1,86 @@
+// PostgreSQL schema. Domain timestamps are ISO-8601 strings in TypeScript;
+// they are stored as timestamptz here and converted by the mappers, so the
+// database can order and index time without string parsing.
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Customer {
+  id        String   @id
+  email     String   @unique
+  name      String
+  createdAt DateTime
+}
+
+model Product {
+  id                 String   @id
+  name               String
+  amountInMinorUnits Int
+  currency           String
+  createdAt          DateTime
+}
+
+model InventoryItem {
+  id         String   @id
+  productId  String   @unique
+  available  Int
+  reserved   Int
+  updatedAt  DateTime
+}
+
+// Cart and order lines are immutable snapshots, so they are stored as JSON
+// rather than a second schema that has to stay in sync with the snapshot.
+model Cart {
+  id         String   @id
+  customerId String   @unique
+  items      Json
+  createdAt  DateTime
+  updatedAt  DateTime
+}
+
+model Order {
+  id                 String    @id
+  customerId         String
+  items              Json
+  totalAmountInMinor Int
+  currency           String
+  status             String
+  createdAt          DateTime
+  updatedAt          DateTime
+  paidAt             DateTime?
+  cancelledAt        DateTime?
+
+  @@index([customerId])
+}
+
+// Transactional outbox with backoff and a dead-letter state. `nextAttemptAt`
+// is what makes retries exponential instead of a hot loop; `deadLetteredAt`
+// stops a poison message from being retried forever.
+model OutboxMessage {
+  id             String    @id
+  eventName      String
+  occurredAt     DateTime
+  payload        Json
+  createdAt      DateTime
+  publishedAt    DateTime?
+  attempts       Int       @default(0)
+  lastError      String?
+  nextAttemptAt  DateTime  @default(now())
+  deadLetteredAt DateTime?
+
+  @@index([publishedAt, deadLetteredAt, nextAttemptAt])
+}
+
+// Durable inbox: a consumer records an event id before handling it, so a
+// redelivery after a restart is recognised and skipped. The unique id is the
+// whole guarantee.
+model ProcessedEvent {
+  id          String   @id
+  eventName   String
+  processedAt DateTime
+}

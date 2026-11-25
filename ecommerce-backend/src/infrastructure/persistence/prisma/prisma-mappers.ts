@@ -4,7 +4,8 @@ import type { Cart as CartAggregate } from "../../../domain/cart/cart.js";
 import type { CartItem } from "../../../domain/cart/cart-item.js";
 import type { Customer } from "../../../domain/customer/customer.js";
 import type { InventoryItem } from "../../../domain/inventory/inventory-item.js";
-import type { Order, OrderItem } from "../../../domain/order/order.js";
+import type { Order } from "../../../domain/order/order.js";
+import type { OrderItem } from "../../../domain/order/order-item.js";
 import type { OrderStatus } from "../../../domain/order/order-status.js";
 import type { Product } from "../../../domain/product/product.js";
 
@@ -221,9 +222,6 @@ export function toOutboxRow(message: OutboxMessage) {
     lastError: message.lastError,
     nextAttemptAt: toDate(message.nextAttemptAt),
     deadLetteredAt:
-      message.deadLetteredAt === null
-        ? null
-        : toDate(message.deadLetteredAt),
+      message.deadLetteredAt === null ? null : toDate(message.deadLetteredAt),
   };
 }
-

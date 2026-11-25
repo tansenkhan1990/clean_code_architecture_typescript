@@ -26,7 +26,6 @@ function forbidImports(patterns, message) {
 const frameworks = [
   "fastify",
   "zod",
-  "mongodb",
   "ioredis",
   "kafkajs",
   "prom-client",

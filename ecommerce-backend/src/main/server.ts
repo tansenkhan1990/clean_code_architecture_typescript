@@ -82,8 +82,7 @@ async function start(): Promise<void> {
 
   app.log.info(
     {
-      persistence:
-        config.value.databaseUrl === null ? "memory" : "postgresql",
+      persistence: config.value.databaseUrl === null ? "memory" : "postgresql",
       cache: config.value.redisUrl === null ? "memory" : "redis",
       events: config.value.kafkaBrokers === null ? "stdout" : "kafka",
       rateLimit: config.value.rateLimit,

@@ -3,7 +3,7 @@ CREATE TABLE "Customer" (
     "id" TEXT NOT NULL,
     "email" TEXT NOT NULL,
     "name" TEXT NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL,
+    "createdAt" TIMESTAMPTZ(3) NOT NULL,
 
     CONSTRAINT "Customer_pkey" PRIMARY KEY ("id")
 );
@@ -14,7 +14,7 @@ CREATE TABLE "Product" (
     "name" TEXT NOT NULL,
     "amountInMinorUnits" INTEGER NOT NULL,
     "currency" TEXT NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL,
+    "createdAt" TIMESTAMPTZ(3) NOT NULL,
 
     CONSTRAINT "Product_pkey" PRIMARY KEY ("id")
 );
@@ -25,7 +25,7 @@ CREATE TABLE "InventoryItem" (
     "productId" TEXT NOT NULL,
     "available" INTEGER NOT NULL,
     "reserved" INTEGER NOT NULL,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "updatedAt" TIMESTAMPTZ(3) NOT NULL,
 
     CONSTRAINT "InventoryItem_pkey" PRIMARY KEY ("id")
 );
@@ -35,8 +35,8 @@ CREATE TABLE "Cart" (
     "id" TEXT NOT NULL,
     "customerId" TEXT NOT NULL,
     "items" JSONB NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
+    "createdAt" TIMESTAMPTZ(3) NOT NULL,
+    "updatedAt" TIMESTAMPTZ(3) NOT NULL,
 
     CONSTRAINT "Cart_pkey" PRIMARY KEY ("id")
 );
@@ -49,10 +49,10 @@ CREATE TABLE "Order" (
     "totalAmountInMinor" INTEGER NOT NULL,
     "currency" TEXT NOT NULL,
     "status" TEXT NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL,
-    "updatedAt" TIMESTAMP(3) NOT NULL,
-    "paidAt" TIMESTAMP(3),
-    "cancelledAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMPTZ(3) NOT NULL,
+    "updatedAt" TIMESTAMPTZ(3) NOT NULL,
+    "paidAt" TIMESTAMPTZ(3),
+    "cancelledAt" TIMESTAMPTZ(3),
 
     CONSTRAINT "Order_pkey" PRIMARY KEY ("id")
 );
@@ -61,14 +61,14 @@ CREATE TABLE "Order" (
 CREATE TABLE "OutboxMessage" (
     "id" TEXT NOT NULL,
     "eventName" TEXT NOT NULL,
-    "occurredAt" TIMESTAMP(3) NOT NULL,
+    "occurredAt" TIMESTAMPTZ(3) NOT NULL,
     "payload" JSONB NOT NULL,
-    "createdAt" TIMESTAMP(3) NOT NULL,
-    "publishedAt" TIMESTAMP(3),
+    "createdAt" TIMESTAMPTZ(3) NOT NULL,
+    "publishedAt" TIMESTAMPTZ(3),
     "attempts" INTEGER NOT NULL DEFAULT 0,
     "lastError" TEXT,
-    "nextAttemptAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    "deadLetteredAt" TIMESTAMP(3),
+    "nextAttemptAt" TIMESTAMPTZ(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    "deadLetteredAt" TIMESTAMPTZ(3),
 
     CONSTRAINT "OutboxMessage_pkey" PRIMARY KEY ("id")
 );
@@ -77,7 +77,7 @@ CREATE TABLE "OutboxMessage" (
 CREATE TABLE "ProcessedEvent" (
     "id" TEXT NOT NULL,
     "eventName" TEXT NOT NULL,
-    "processedAt" TIMESTAMP(3) NOT NULL,
+    "processedAt" TIMESTAMPTZ(3) NOT NULL,
 
     CONSTRAINT "ProcessedEvent_pkey" PRIMARY KEY ("id")
 );

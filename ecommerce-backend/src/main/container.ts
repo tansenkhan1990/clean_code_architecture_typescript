@@ -283,7 +283,7 @@ export type Container = {
  *
  * Selection is configuration, not code branching inside the application:
  *
- *   MONGODB_URI  → Mongo repositories + transactional unit of work
+ *   DATABASE_URL → Prisma repositories + serializable unit of work
  *   REDIS_URL    → Redis cache, atomic idempotency, shared rate limiting
  *   KAFKA_BROKERS→ Kafka producer behind the outbox + an idempotent consumer
  */
@@ -297,9 +297,8 @@ export async function buildContainer({
   const healthChecks: HealthCheck[] = [];
   const shutdown: (() => Promise<void>)[] = [];
 
-    let persistence: Awaited<
-    ReturnType<typeof buildPrismaPersistence>
-  > | null = null;
+  let persistence: Awaited<ReturnType<typeof buildPrismaPersistence>> | null =
+    null;
   let inbox: InboxStore = createInMemoryInboxStore();
   let cache: Cache = createInMemoryCache();
   let idempotency: IdempotencyStore = createInMemoryIdempotencyStore();

@@ -13,7 +13,7 @@ afterEach(async () => {
   app = null;
 });
 
-const healthy: HealthCheck = { name: "mongodb", check: async () => undefined };
+const healthy: HealthCheck = { name: "postgres", check: async () => undefined };
 const broken: HealthCheck = {
   name: "redis",
   check: async () => {
@@ -35,7 +35,7 @@ describe("platform endpoints", () => {
     expect(response.statusCode).toBe(200);
     expect(response.json()).toEqual({
       status: "ok",
-      checks: { mongodb: "up" },
+      checks: { postgres: "up" },
     });
   });
 
@@ -52,7 +52,7 @@ describe("platform endpoints", () => {
     expect(response.statusCode).toBe(503);
     expect(response.json()).toEqual({
       status: "degraded",
-      checks: { mongodb: "up", redis: "down" },
+      checks: { postgres: "up", redis: "down" },
     });
   });
 

@@ -1,6 +1,6 @@
 // PostgreSQL schema. Domain timestamps are ISO-8601 strings in TypeScript;
 // they are stored as timestamptz here and converted by the mappers, so the
-// database can order and index time without string parsing.
+// database compares absolute instants and never guesses a zone.
 generator client {
   provider = "prisma-client-js"
 }
@@ -14,7 +14,7 @@ model Customer {
   id        String   @id
   email     String   @unique
   name      String
-  createdAt DateTime
+  createdAt DateTime @db.Timestamptz(3)
 }
 
 model Product {
@@ -22,15 +22,15 @@ model Product {
   name               String
   amountInMinorUnits Int
   currency           String
-  createdAt          DateTime
+  createdAt          DateTime @db.Timestamptz(3)
 }
 
 model InventoryItem {
-  id         String   @id
-  productId  String   @unique
-  available  Int
-  reserved   Int
-  updatedAt  DateTime
+  id        String   @id
+  productId String   @unique
+  available Int
+  reserved  Int
+  updatedAt DateTime @db.Timestamptz(3)
 }
 
 // Cart and order lines are immutable snapshots, so they are stored as JSON
@@ -39,8 +39,8 @@ model Cart {
   id         String   @id
   customerId String   @unique
   items      Json
-  createdAt  DateTime
-  updatedAt  DateTime
+  createdAt  DateTime @db.Timestamptz(3)
+  updatedAt  DateTime @db.Timestamptz(3)
 }
 
 model Order {
@@ -50,10 +50,10 @@ model Order {
   totalAmountInMinor Int
   currency           String
   status             String
-  createdAt          DateTime
-  updatedAt          DateTime
-  paidAt             DateTime?
-  cancelledAt        DateTime?
+  createdAt          DateTime  @db.Timestamptz(3)
+  updatedAt          DateTime  @db.Timestamptz(3)
+  paidAt             DateTime? @db.Timestamptz(3)
+  cancelledAt        DateTime? @db.Timestamptz(3)
 
   @@index([customerId])
 }
@@ -64,14 +64,14 @@ model Order {
 model OutboxMessage {
   id             String    @id
   eventName      String
-  occurredAt     DateTime
+  occurredAt     DateTime  @db.Timestamptz(3)
   payload        Json
-  createdAt      DateTime
-  publishedAt    DateTime?
+  createdAt      DateTime  @db.Timestamptz(3)
+  publishedAt    DateTime? @db.Timestamptz(3)
   attempts       Int       @default(0)
   lastError      String?
-  nextAttemptAt  DateTime  @default(now())
-  deadLetteredAt DateTime?
+  nextAttemptAt  DateTime  @default(now()) @db.Timestamptz(3)
+  deadLetteredAt DateTime? @db.Timestamptz(3)
 
   @@index([publishedAt, deadLetteredAt, nextAttemptAt])
 }
@@ -82,5 +82,5 @@ model OutboxMessage {
 model ProcessedEvent {
   id          String   @id
   eventName   String
-  processedAt DateTime
+  processedAt DateTime @db.Timestamptz(3)
 }

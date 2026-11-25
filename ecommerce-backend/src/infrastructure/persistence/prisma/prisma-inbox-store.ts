@@ -1,30 +1,21 @@
-import { Prisma, type PrismaClient } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
 import type { InboxStore } from "../../../application/ports/inbox-store.js";
 
 /**
- * `create` plus a unique primary key is the atomic check-and-set: two
- * consumers racing on the same event cannot both insert, and the loser gets
- * P2002, which means "already processed". No read-then-write window.
+ * `createMany` with `skipDuplicates` becomes `INSERT ... ON CONFLICT DO
+ * NOTHING`: the unique primary key decides the winner, the row count says
+ * whether this caller is the first delivery, and a duplicate is not an
+ * exception to log. No read-then-write window.
  */
 export function createPrismaInboxStore(prisma: PrismaClient): InboxStore {
   return {
     async markProcessed({ id, eventName, processedAt }) {
-      try {
-        await prisma.processedEvent.create({
-          data: { id, eventName, processedAt: new Date(processedAt) },
-        });
+      const { count } = await prisma.processedEvent.createMany({
+        data: [{ id, eventName, processedAt: new Date(processedAt) }],
+        skipDuplicates: true,
+      });
 
-        return true;
-      } catch (error) {
-        if (
-          error instanceof Prisma.PrismaClientKnownRequestError &&
-          error.code === "P2002"
-        ) {
-          return false;
-        }
-
-        throw error;
-      }
+      return count === 1;
     },
 
     async hasProcessed(id) {

@@ -4,8 +4,8 @@ import type { Prisma } from "@prisma/client";
 /**
  * Repositories need the transaction-scoped client to join a unit of work.
  * Threading it through every port would leak persistence into the
- * application, so it travels through async context instead — the same shape
- * as the MongoDB session adapter, and equally invisible to use cases.
+ * application, so it travels through async context instead, invisible to use
+ * cases and identical in shape to the previous document-store adapter.
  */
 const storage = new AsyncLocalStorage<Prisma.TransactionClient>();
 

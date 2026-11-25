@@ -1,8 +1,0 @@
-node_modules
-dist
-data
-test
-tsconfig.test.json
-.env
-.git
-npm-debug.log*
